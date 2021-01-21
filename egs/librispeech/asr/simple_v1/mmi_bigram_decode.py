@@ -210,10 +210,15 @@ def main():
     ctc_topo = build_ctc_topo(phone_ids_with_blank)
     ctc_topo_inv = k2.arc_sort(ctc_topo.invert())
 
+    if not torch.cuda.is_available():
+        logging.warning('No GPU detected! Use CPU.')
+        device = torch.device('cpu')
+    else:
+        # Note: Use "export CUDA_VISIBLE_DEVICES=N" to setup device id to N
+        device_id = 0
+        device = torch.device('cuda', device_id)
+
     logging.debug("About to load model")
-    # Note: Use "export CUDA_VISIBLE_DEVICES=N" to setup device id to N
-    # device = torch.device('cuda', 1)
-    device = torch.device('cuda')
     model = TdnnLstm1b(num_features=40,
                        num_classes=len(phone_ids) + 1, # +1 for the blank symbol
                        subsampling_factor=3)

@@ -106,7 +106,6 @@ def get_objf(batch: Dict,
     # nnet_output2[:,:,0] += blank_bias
 
     dense_fsa_vec = k2.DenseFsaVec(nnet_output, supervision_segments)
-    assert decoding_graph.is_cuda()
     assert decoding_graph.device == device
     assert nnet_output.device == device
 
@@ -289,12 +288,13 @@ def main():
                                            num_workers=1)
 
     if not torch.cuda.is_available():
-        logging.error('No GPU detected!')
-        sys.exit(-1)
+        logging.warning('No GPU detected! Use CPU.')
+        device = torch.device('cpu')
+    else:
+        device_id = 0
+        device = torch.device('cuda', device_id)
 
     logging.info("About to create model")
-    device_id = 0
-    device = torch.device('cuda', device_id)
     model = TdnnLstm1b(num_features=40, num_classes=len(phone_symbol_table), subsampling_factor=3)
 
     learning_rate = 0.00001

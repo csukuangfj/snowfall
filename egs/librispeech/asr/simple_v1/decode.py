@@ -173,14 +173,19 @@ def main():
     print("About to create test dataloader")
     test_dl = torch.utils.data.DataLoader(test, batch_size=None, num_workers=1)
 
+    if not torch.cuda.is_available():
+        logging.warning('No GPU detected! Use CPU.')
+        device = torch.device('cpu')
+    else:
+        # Note: Use "export CUDA_VISIBLE_DEVICES=N" to setup device id to N
+        device_id = 0
+        device = torch.device('cuda', device_id)
+
     #  if not torch.cuda.is_available():
     #  logging.error('No GPU detected!')
     #  sys.exit(-1)
 
     print("About to load model")
-    # Note: Use "export CUDA_VISIBLE_DEVICES=N" to setup device id to N
-    # device = torch.device('cuda', 1)
-    device = torch.device('cuda')
     model = TdnnLstm1b(num_features=40, num_classes=len(phone_symbol_table))
     checkpoint = os.path.join(exp_dir, 'epoch-7.pt')
     load_checkpoint(checkpoint, model)

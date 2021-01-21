@@ -1,0 +1,52 @@
+# Copyright (c)  2020  Xiaomi Corp. (author: Fangjun Kuang)
+#
+#
+name: smoke_test
+
+on:
+  push:
+    branches:
+      - master
+  pull_request:
+    branches:
+      - master
+
+jobs:
+  test:
+    strategy:
+      matrix:
+        python-version: [3.8]
+    steps:
+      - uses: actions/checkout@v2
+
+      - name: Setup Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v2
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Display Python version
+        run: python -c "import sys; print(sys.version)"
+
+      - name: Install Dependencies
+        shell: bash
+        run: |
+          python3 -m pip install --upgrade pip
+          python3 -m pip install torch==1.6.0+cu101 -f https://download.pytorch.org/whl/torch_stable.html
+          python3 -m pip install torchaudio==0.6.0
+          python3 -m pip install --pre k2
+
+          cd /tmp/ && git clone --depth 1 https://github.com/lhotse-speech/lhotse.git
+
+      - name: Download dataset
+        shell: bash
+        run: |
+          cd /tmp && git clone --depth 1 https://github.com/csukuangfj/musan-subset musan
+          cd /tmp && git clone --depth 1 https://github.com/csukuangfj/librispeech-subset librispeech
+
+      - name: Run LibriSpeech tests
+        shell: bash
+        run: |
+          sudo apt-get install chrpath
+          export PYTHONPATH=/tmp/lhotse:$PYTHONPATH
+          cd egs/librispeech/asr/simple_v1
+          ./run.sh

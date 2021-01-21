@@ -325,12 +325,13 @@ def main():
                                            num_workers=1)
 
     if not torch.cuda.is_available():
-        logging.error('No GPU detected!')
-        sys.exit(-1)
+        logging.warning('No GPU detected! Use CPU.')
+        device = torch.device('cpu')
+    else:
+        device_id = 0
+        device = torch.device('cuda', device_id)
 
     logging.info("About to create model")
-    device_id = 0
-    device = torch.device('cuda', device_id)
     model = TdnnLstm1b(num_features=40,
                        num_classes=len(phone_ids) + 1, # +1 for the blank symbol
                        subsampling_factor=3)

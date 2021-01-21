@@ -60,7 +60,9 @@ def main():
     print("Parts we will prepare: ", dataset_parts)
 
     corpus_dirs = [Path('/export/corpora5/LibriSpeech'),
-                   Path('/home/storage04/zhuangweiji/data/open-source-data/librispeech/LibriSpeech')]
+                   Path('/home/storage04/zhuangweiji/data/open-source-data/librispeech/LibriSpeech'),
+                   Path('/tmp/librispeech')]
+
     corpus_dir = None
     for d in corpus_dirs:
         if os.path.exists(d):
@@ -68,6 +70,18 @@ def main():
     if corpus_dir is None:
         print("Please create a place on your system to put the downloaded Librispeech data "
               "and add it to `corpus_dirs`")
+        sys.exit(1)
+
+    musan_dirs = [Path('/export/corpora5/JHU/musan'),
+                  Path('/root/fangjun/data/musan'),
+                  Path('/tmp/musan')]
+    musan_dir = None
+    for d in musan_dirs:
+        if os.path.exists(d):
+            musan_dir = d
+    if musan_dir is None:
+        print("Please create a place on your system to put the downloaded MUSAN data "
+              "and add it to `musan_dirs`")
         sys.exit(1)
 
     output_dir = Path('exp/data')
@@ -82,7 +96,7 @@ def main():
     print('Musan manifest preparation:')
     musan_cuts_path = output_dir / 'cuts_musan.json.gz'
     musan_manifests = prepare_musan(
-        corpus_dir='/export/corpora5/JHU/musan',
+        corpus_dir=musan_dir,
         output_dir=output_dir,
         parts=('music', 'speech', 'noise')
     )
