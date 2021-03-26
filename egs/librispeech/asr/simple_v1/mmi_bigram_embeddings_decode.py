@@ -100,16 +100,40 @@ def decode(dataloader: torch.utils.data.DataLoader, model: AcousticModel,
             tot_scores_1st = word_lats.get_tot_scores(use_double_scores=True,
                                                       log_semiring=True)
 
-            best_paths = rescore(lats=lattices,
-                                 paths=paths,
-                                 word_fsas=word_fsas,
-                                 tot_scores_1st=tot_scores_1st,
-                                 seq_to_path_shape=seq_to_path_shape,
-                                 ctc_topo=ctc_topo,
-                                 decoding_graph=LG,
-                                 dense_fsa_vec=dense_fsa_vec_2nd,
-                                 second_pass_model=second_pass_model,
-                                 max_phone_id=max_phone_id)
+            if False:
+                tot_scores = tot_scores_1st
+                logging.info(f'tot_scores: {tot_scores}')
+                lats = lattices
+                ragged_tot_scores = k2.RaggedFloat(
+                    seq_to_path_shape, tot_scores.to(torch.float32))
+
+                _argmax_indexes = k2.ragged.argmax_per_sublist(
+                    ragged_tot_scores)
+
+                argmax_indexes = torch.clamp(_argmax_indexes, min=0)
+                if argmax_indexes.sum() != _argmax_indexes.sum():
+                    logging.info(f'-1 appears: {_argmax_indexes}')
+
+                paths = k2.ragged.remove_axis(paths, 0)
+
+                best_paths = k2.index(paths, argmax_indexes)
+                labels = k2.index(lats.labels.contiguous(), best_paths)
+                aux_labels = k2.index(lats.aux_labels, best_paths.values())
+                labels = k2.ragged.remove_values_eq(labels, -1)
+                best_paths = k2.linear_fsa(labels)
+                best_paths.aux_labels = aux_labels
+
+            else:
+                best_paths = rescore(lats=lattices,
+                                     paths=paths,
+                                     word_fsas=word_fsas,
+                                     tot_scores_1st=tot_scores_1st,
+                                     seq_to_path_shape=seq_to_path_shape,
+                                     ctc_topo=ctc_topo,
+                                     decoding_graph=LG,
+                                     dense_fsa_vec=dense_fsa_vec_2nd,
+                                     second_pass_model=second_pass_model,
+                                     max_phone_id=max_phone_id)
 
 
         if False and enable_second_pass_decoding:
@@ -270,11 +294,14 @@ def get_parser():
 
 def main():
     args = get_parser().parse_args()
-    exp_dir = f'exp-lstm-adam-mmi-bigram-embeddings-musan-dist-2021-03-12'
+    exp_dir = f'exp-lstm-adam-mmi-bigram-embeddings-musan-dist'
+    #  exp_dir = f'exp-lstm-adam-mmi-bigram-embeddings-musan-dist-2021-03-12'
     #  exp_dir = f'exp-lstm-adam-mmi-bigram-embeddings-musan-dist-0.01'
 
     if args.enable_second_pass_decoding:
-        setup_logger('{}/log/log-decode-second'.format(exp_dir), log_level='debug')
+        #  setup_logger('{}/log/log-decode-second-1best-shortest'.format(exp_dir), log_level='debug')
+        #  setup_logger('{}/log/log-decode-second'.format(exp_dir), log_level='debug')
+        setup_logger('{}/log/log-decode-posterior-second'.format(exp_dir), log_level='debug')
     else:
         setup_logger('{}/log/log-decode'.format(exp_dir), log_level='debug')
 
@@ -303,13 +330,13 @@ def main():
     model.P_scores = torch.nn.Parameter(P.scores.clone(), requires_grad=False)
 
     # it consist of three parts
-    #  (1) len(phone_ids) + 1
-    #  (2) graph_compiler.max_phone_id + 2
-    #  (3) 1
+    #  (1) len(phone_ids) + 1, i.e., the output dim of the first pass network
+    #  (2) graph_compiler.max_phone_id + 1 (for one-hot encoding)
+    #  (3) 1 (for duration)
     max_phone_id = max(phone_ids)
-    num_embedding_features = len(phone_ids) + 1 + max_phone_id + 3
+    logging.info(f'num_classes: {max_phone_id}')
+    num_embedding_features = len(phone_ids) + 1 + max_phone_id + 1 + 1
     second_pass_model = Tdnn2aEmbedding(num_features=num_embedding_features, num_classes=len(phone_ids)+1)
-
 
     checkpoint = os.path.join(exp_dir, f'epoch-{args.epoch}.pt')
     second_pass_checkpoint = os.path.join(exp_dir, f'second-pass-epoch-{args.epoch}.pt')

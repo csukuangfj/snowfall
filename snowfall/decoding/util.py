@@ -18,7 +18,7 @@ def get_log_probs(phone_fsas: k2.Fsa, nnet_output: torch.Tensor,
     assert len(phone_fsas.shape) == 3
     offset = phone_fsas.arcs.row_splits(2)[phone_fsas.arcs.row_splits(
         1).long()]
-    expected_len_per_path = offset[1:] - offset[:-1]
+    expected_len_per_path = offset[1:] - offset[:-1] - 1
     assert torch.all(torch.eq(len_per_path, expected_len_per_path.cpu()))
 
     phone_fsas = phone_fsas.to('cpu')
@@ -36,7 +36,7 @@ def get_log_probs(phone_fsas: k2.Fsa, nnet_output: torch.Tensor,
         for idx, row in enumerate(this_fsa_nnet_output):
             if idx >= len_this_fsa:
                 break
-            this_prob.append(row[labels[idx]].item())
+            this_prob.append(row[labels[idx]].exp().item())
         probs.append(this_prob)
 
     assert len(probs) == num_paths

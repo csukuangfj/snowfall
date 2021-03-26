@@ -144,7 +144,7 @@ def rescore(lats: k2.Fsa,
     second_pass_out = second_pass_out.permute(0, 2, 1)
     # now second_pass_out is of shape [N, T, C]
 
-    if True:
+    if False:
         phone_seqs, _, _ = k2.ragged.unique_sequences(phone_seqs, True, True)
         phone_seqs = k2.ragged.remove_axis(phone_seqs, 0)
         phone_fsas = create_phone_fsas(phone_seqs)
@@ -202,18 +202,21 @@ def rescore(lats: k2.Fsa,
         tot_scores_2nd_num = reorded_lats.get_tot_scores(
             use_double_scores=True, log_semiring=True)
 
-        for k in [0, 1, 2, 30, 40, 50]:
-            pk, _ = k2.ragged.index(probs, torch.tensor([k],
-                                                        dtype=torch.int32))
-            assert pk.num_elements() == len_per_path[k]
-            logging.info(
-                f'\npath: {k}\ntot_scores: {tot_scores_2nd_num[k]}\nlog_probs:{str(pk)}'
-            )
+        #  for k in [0, 1, 2, 30, 40, 50]:
+        #      pk, _ = k2.ragged.index(probs, torch.tensor([k],
+        #                                                  dtype=torch.int32))
+        #      assert pk.num_elements() == len_per_path[k]
+        #      logging.info(
+        #          f'\npath: {k}\ntot_scores: {tot_scores_2nd_num[k]}\nlog_probs:{str(pk)}'
+        #      )
 
         tot_scores_2nd_den = second_pass_lattices.get_tot_scores(
             log_semiring=True, use_double_scores=use_double_scores)
 
         tot_scores_2nd = tot_scores_2nd_num - tot_scores_2nd_den
+        logging.info(f'num: {tot_scores_2nd_num}')
+        logging.info(f'den: {tot_scores_2nd_den}')
+        logging.info(f'2nd: {tot_scores_2nd}')
 
         #  print(
         #      'word',
@@ -222,29 +225,46 @@ def rescore(lats: k2.Fsa,
         #  print(
         #      reorded_lats.arcs.row_splits(1)[1:] -
         #      reorded_lats.arcs.row_splits(1)[:-1])
-        print('2 num', tot_scores_2nd_num)
-        print('2 den', tot_scores_2nd_den)
+        #  print('2 num', tot_scores_2nd_num)
+        #  print('2 den', tot_scores_2nd_den)
+        #  print('2 ', tot_scores_2nd)
 
-        import sys
-        sys.exit(0)
+        #  import sys
+        #  sys.exit(0)
     else:
         tot_scores_2nd = second_pass_lattices.get_tot_scores(
             use_double_scores=True, log_semiring=True)
+        #  logging.info(f'tot_scores_2nd: {tot_scores_2nd}')
 
     # Now tot_scores_2nd[i] corresponds to sorted_path_i
     # `sorted` here is due to k2.ragged.unique_sequences.
     # We have to use `new2old` to map it to the original unsorted path
 
     # Note that path_weight was not reordered
+
+    # argmax for the 1st pass
+    ragged_tot_scores_1st = k2.RaggedFloat(seq_to_path_shape,
+                                           tot_scores_1st.to(torch.float32))
+    argmax_indexes_1st = k2.ragged.argmax_per_sublist(ragged_tot_scores_1st)
+    argmax_indexes_1st = torch.clamp(argmax_indexes_1st, min=0)
+
+    #  logging.info(f'1st: {tot_scores_1st}')
     tot_scores = tot_scores_1st
     tot_scores[new2old.long()] += tot_scores_2nd * path_weight
     ragged_tot_scores = k2.RaggedFloat(seq_to_path_shape,
                                        tot_scores.to(torch.float32))
-    argmax_indexes = k2.ragged.argmax_per_sublist(ragged_tot_scores)
-    print(argmax_indexes)
+    _argmax_indexes = k2.ragged.argmax_per_sublist(ragged_tot_scores)
+    #  logging.info(f'indexes: {argmax_indexes}')
+    #  print(argmax_indexes)
     # argmax_indexes may contain -1. This case happens
     # when a sublist contains all -inf
-    argmax_indexes = torch.clamp(argmax_indexes, min=0)
+    argmax_indexes = torch.clamp(_argmax_indexes, min=0)
+    if argmax_indexes.sum() != _argmax_indexes.sum():
+        logging.info(
+            f'-1 appears: {tot_scores}, {ragged_tot_scores}, {_argmax_indexes}'
+        )
+
+    #  logging.info(f'\n{argmax_indexes_1st}\n{argmax_indexes}')
 
     paths = k2.ragged.remove_axis(paths, 0)
 
