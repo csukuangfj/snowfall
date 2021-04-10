@@ -31,42 +31,14 @@ from snowfall.common import setup_logger
 from snowfall.dist import cleanup_dist, setup_dist
 from snowfall.lexicon import Lexicon
 from snowfall.models import AcousticModel
-from snowfall.models.tdnn_lstm import TdnnLstm1b
-from snowfall.objectives.mmi import LFMMILoss
+from snowfall.models.foo import Foo
+from snowfall.objectives import LFMMILoss, encode_supervisions
 from snowfall.training.diagnostics import measure_gradient_norms, optim_step_and_measure_param_change
 from snowfall.training.mmi_graph import MmiTrainingGraphCompiler
 from snowfall.training.mmi_graph import create_bigram_phone_lm
 from snowfall.training.mmi_graph import get_phone_symbols
 
 den_scale = 1.0
-
-def encode_supervisions(supervisions: Dict[str, torch.Tensor],
-                        subsampling_factor) -> Tuple[torch.Tensor, List[str]]:
-    """
-    Encodes Lhotse's ``batch["supervisions"]`` dict into a pair of torch Tensor,
-    and a list of transcription strings.
-
-    The supervision tensor has shape ``(batch_size, 3)``.
-    Its second dimension contains information about sequence index [0],
-    start frames [1] and num frames [2].
-
-    The batch items might become re-ordered during this operation -- the returned tensor
-    and list of strings are guaranteed to be consistent with each other.
-
-    This mimics subsampling by a factor of 4 with Conv1D layer with no padding.
-    """
-    supervision_segments = torch.stack(
-        (supervisions['sequence_idx'],
-         torch.floor_divide(supervisions['start_frame'],
-                            subsampling_factor),
-         torch.floor_divide(supervisions['num_frames'],
-                            subsampling_factor)), 1).to(torch.int32)
-    supervision_segments = torch.clamp(supervision_segments, min=0)
-    indices = torch.argsort(supervision_segments[:, 2], descending=True)
-    supervision_segments = supervision_segments[indices]
-    texts = supervisions['text']
-    texts = [texts[idx] for idx in indices]
-    return supervision_segments, texts
 
 
 def get_objf(batch: Dict,
@@ -85,8 +57,7 @@ def get_objf(batch: Dict,
     feature = feature.to(device)
 
     supervisions = batch['supervisions']
-    supervision_segments, texts = encode_supervisions(supervisions,
-                                                      model.subsampling_factor)
+    supervision_segments, texts = encode_supervisions(supervisions)
 
     loss_fn = LFMMILoss(
         graph_compiler=graph_compiler,
@@ -354,9 +325,10 @@ def main():
         sys.exit(-1)
 
     logging.info("About to create model")
-    model = TdnnLstm1b(num_features=80,
-                       num_classes=len(phone_ids) + 1,  # +1 for the blank symbol
-                       subsampling_factor=3)
+    model = Foo(num_features=80,
+                num_classes=len(phone_ids) + 1,  # +1 for the blank symbol
+                dim=256,
+                hidden_dim=512)
     model.P_scores = nn.Parameter(P.scores.clone(), requires_grad=True)
 
     model.to(device)
