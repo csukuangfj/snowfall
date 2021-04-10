@@ -27,6 +27,7 @@ class Foo(AcousticModel):
         super().__init__()
         self.num_features = num_features
         self.num_classes = num_classes
+        self.subsampling_factor = 4
 
         self.input_layers = nn.Sequential(
             nn.Conv1d(in_channels=num_features,
