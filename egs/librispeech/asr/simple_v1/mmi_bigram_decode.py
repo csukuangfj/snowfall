@@ -23,7 +23,7 @@ from snowfall.common import setup_logger
 from snowfall.decoding.graph import compile_HLG
 from snowfall.lexicon import Lexicon
 from snowfall.models import AcousticModel
-from snowfall.models.tdnn_lstm import TdnnLstm1b
+from snowfall.models.foo import Foo
 from snowfall.training.ctc_graph import build_ctc_topo
 from snowfall.training.mmi_graph import create_bigram_phone_lm
 from snowfall.training.mmi_graph import get_phone_symbols
@@ -39,10 +39,8 @@ def decode(dataloader: torch.utils.data.DataLoader, model: AcousticModel,
         supervisions = batch['supervisions']
         supervision_segments = torch.stack(
             (supervisions['sequence_idx'],
-             torch.floor_divide(supervisions['start_frame'],
-                                model.subsampling_factor),
-             torch.floor_divide(supervisions['num_frames'],
-                                model.subsampling_factor)), 1).to(torch.int32)
+             (((supervisions['start_frame'] - 1) // 2 - 1) // 2),
+             (((supervisions['num_frames'] - 1) // 2 - 1) // 2)), 1).to(torch.int32)
         supervision_segments = torch.clamp(supervision_segments, min=0)
         indices = torch.argsort(supervision_segments[:, 2], descending=True)
         supervision_segments = supervision_segments[indices]
@@ -164,7 +162,7 @@ def get_parser():
 
 def main():
     args = get_parser().parse_args()
-    exp_dir = Path('exp-lstm-adam-mmi-bigram-musan-dist')
+    exp_dir = Path('exp-lstm-adam-mmi-bigram-musan-foo')
     setup_logger('{}/log/log-decode'.format(exp_dir), log_level='debug')
 
     # load L, G, symbol_table
@@ -181,9 +179,10 @@ def main():
     # Note: Use "export CUDA_VISIBLE_DEVICES=N" to setup device id to N
     # device = torch.device('cuda', 1)
     device = torch.device('cuda')
-    model = TdnnLstm1b(num_features=80,
-                       num_classes=len(phone_ids) + 1,  # +1 for the blank symbol
-                       subsampling_factor=3)
+    model = Foo(num_features=80,
+                num_classes=len(phone_ids) + 1,  # +1 for the blank symbol
+                dim=256,
+                hidden_dim=512)
     model.P_scores = torch.nn.Parameter(P.scores.clone(), requires_grad=False)
 
     checkpoint = os.path.join(exp_dir, f'epoch-{args.epoch}.pt')
