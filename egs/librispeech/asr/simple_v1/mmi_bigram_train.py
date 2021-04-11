@@ -242,7 +242,7 @@ def main():
     num_epochs = 10
     use_adam = True
 
-    exp_dir = f'exp-lstm-adam-mmi-bigram-musan-foo'
+    exp_dir = f'exp-lstm-adam-mmi-bigram-musan-foo-pass2'
     setup_logger('{}/log/log-train'.format(exp_dir), use_console=args.local_rank == 0)
     tb_writer = SummaryWriter(log_dir=f'{exp_dir}/tensorboard') if args.local_rank == 0 else None
 
@@ -330,6 +330,21 @@ def main():
                 dim=256,
                 hidden_dim=512)
     model.P_scores = nn.Parameter(P.scores.clone(), requires_grad=True)
+
+
+    if True:  # This block loads permanent parameters..
+        last_model = 'exp-lstm-adam-mmi-bigram-musan-foo/epoch-8.pt'
+        state_dict = torch.load(last_model, map_location=torch.device('cpu'))['state_dict']
+
+        key_prefix = ('module.' if
+                      (not list(model.state_dict().keys())[0].startswith('module.') \
+                       and list(state_dict)[0].startswith('module.'))
+                      else '')
+        suffix='_perm'
+        state_dict = { (key_prefix+x):state_dict[x] for x in state_dict.keys()
+                       if x.find(suffix)+len(suffix)==len(x) }
+        print("Dict-keys = ", state_dict.keys())
+        model.load_state_dict(state_dict, strict=False)
 
     model.to(device)
     describe(model)
