@@ -162,7 +162,7 @@ def get_parser():
 
 def main():
     args = get_parser().parse_args()
-    exp_dir = Path('exp-lstm-adam-mmi-bigram-musan-foo')
+    exp_dir = Path('exp-lstm-adam-mmi-bigram-musan-foo-pass2')
     setup_logger('{}/log/log-decode'.format(exp_dir), log_level='debug')
 
     # load L, G, symbol_table
