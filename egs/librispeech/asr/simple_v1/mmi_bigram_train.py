@@ -242,7 +242,7 @@ def main():
     num_epochs = 10
     use_adam = True
 
-    exp_dir = f'exp-lstm-adam-mmi-bigram-musan-dist'
+    exp_dir = f'exp-lstm-adam-mmi-bigram-musan-foo'
     setup_logger('{}/log/log-train'.format(exp_dir), use_console=args.local_rank == 0)
     tb_writer = SummaryWriter(log_dir=f'{exp_dir}/tensorboard') if args.local_rank == 0 else None
 
