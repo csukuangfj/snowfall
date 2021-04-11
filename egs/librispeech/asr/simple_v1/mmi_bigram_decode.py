@@ -15,7 +15,7 @@ from typing import List
 from typing import Union
 
 from lhotse import CutSet
-from lhotse.dataset import K2SpeechRecognitionDataset, SingleCutSampler
+from lhotse.dataset import K2SpeechRecognitionDataset, SingleCutSampler, BucketingSampler
 from snowfall.common import find_first_disambig_symbol
 from snowfall.common import get_texts
 from snowfall.common import load_checkpoint
@@ -224,7 +224,10 @@ def main():
 
     logging.info("About to create test dataset")
     test = K2SpeechRecognitionDataset(cuts_test)
-    sampler = SingleCutSampler(cuts_test, max_frames=40000)
+    #sampler = SingleCutSampler(cuts_test, max_frames=40000)
+    sampler = BucketingSampler(cuts_test, max_frames=40000,
+                               num_buckets=30)
+
     logging.info("About to create test dataloader")
     test_dl = torch.utils.data.DataLoader(test, batch_size=None, sampler=sampler, num_workers=1)
 
