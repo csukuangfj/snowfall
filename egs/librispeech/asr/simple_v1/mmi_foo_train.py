@@ -68,7 +68,7 @@ def get_objf(batch: Dict,
     grad_context = nullcontext if is_training else torch.no_grad
 
     with grad_context():
-        nnet_output = model(feature, supervisions)
+        nnet_output = model(feature)
 
         # nnet_output is [N, C, T]
         nnet_output = nnet_output.permute(0, 2, 1)  # now nnet_output is [N, T, C]

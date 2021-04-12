@@ -31,13 +31,13 @@ class Foo(AcousticModel):
         self.subsampling_factor = 4
 
 
-        self.input_layers = nn.Sequential([
+        self.input_layers = nn.Sequential(
             nn.Conv1d(in_channels=num_features,
                       out_channels=dim,
                       kernel_size=3,
                       stride=1,
                       padding=1), nn.ReLU(inplace=True),
-            nn.Conv1d(in_channels=num_features,
+            nn.Conv1d(in_channels=dim,
                       out_channels=dim,
                       kernel_size=3,
                       stride=1,
@@ -47,7 +47,7 @@ class Foo(AcousticModel):
                       kernel_size=3,
                       stride=2,
                       padding=1), nn.ReLU(inplace=True),
-            Normalize(num_features=dim, dim=1)]
+            Normalize(num_features=dim, dim=1))
 
         self.layers_before_subsample2 = nn.Sequential(* [ ConvModule(dim, dim, hidden_dim, dropout=dropout) for
                                                         _ in range(num_layers[0]) ])

@@ -8,6 +8,7 @@ import kaldialign
 import logging
 import os
 import re
+import subprocess
 import torch
 from collections import defaultdict
 from datetime import datetime

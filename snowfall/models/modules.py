@@ -103,6 +103,7 @@ class Conv1dCompressed(torch.nn.Module):
         if bias:
             self.bias = torch.nn.Parameter(torch.empty(out_channels))
         else:
+            self.register_parameter('bias', None)
 
         self.reset_parameters()
 
@@ -197,7 +198,10 @@ class Normalize(torch.nn.Module):
     """
 
     def __init__(self, num_features, dim=1, eps=1.0e-05, affine=True):
+        super(Normalize, self).__init__()
         self.num_features = num_features
+        self.dim = dim
+        self.eps = eps
         self.alpha = math.sqrt(self.num_features)
         if affine:
             self.weight = torch.nn.Parameter(torch.empty(num_features))
@@ -205,20 +209,25 @@ class Normalize(torch.nn.Module):
         else:
             self.register_parameter('weight', None)
             self.register_parameter('bias', None)
-        self.eps = eps
         self.reset_parameters()
 
 
-    def reset_parameters():
+    def reset_parameters(self):
         init = torch.nn.init
         init.constant_(self.bias, 0.)
-        init.constant_(self.weight, 0.)
+        init.constant_(self.weight, 1.)
 
-    def forward(x):
-        assert x.shape[dim] == self.num_features
+    def forward(self, x):
+        assert x.shape[self.dim] == self.num_features
         x = _Normalize.apply(x, self.eps, self.alpha, self.dim)
         if self.weight is not None:
-            x = (x * self.weight) + self.bias
+            weight = self.weight
+            bias = self.bias
+            dim = self.dim if self.dim >= 0 else x.ndim + self.dim
+            for _ in range(dim, x.ndim - 1):
+                weight = weight.unsqueeze(-1)
+                bias = bias.unsqueeze(-1)
+            x = (x * weight) + bias
         return x
 
 
