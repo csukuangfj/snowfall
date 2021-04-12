@@ -23,7 +23,8 @@ class Foo(AcousticModel):
                  dim: int = 256,
                  dropout: float = 0.1,
                  num_layers: Tuple[int] = (5, 12),
-                 hidden_dim: int = 512) -> None:
+                 hidden_dim: int = 512,
+                 initial_batchnorm_scale=0.2) -> None:
         super().__init__()
         self.num_features = num_features
         self.num_classes = num_classes

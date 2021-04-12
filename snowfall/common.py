@@ -43,6 +43,9 @@ def setup_logger(log_filename: Pathlike, log_level: str = 'info', use_console: b
         console.setFormatter(logging.Formatter(formatter))
         logging.getLogger('').addHandler(console)
 
+    git_status = subprocess.check_output(['git', 'status'])
+    logging.info('`git status` output is: {}'.format(git_status))
+
 
 def load_checkpoint(filename: Pathlike, model: AcousticModel, optimizer: Optional[object] = None, scheduler: Optional[object] = None) -> Dict[str, Any]:
     logging.info('load checkpoint from {}'.format(filename))
