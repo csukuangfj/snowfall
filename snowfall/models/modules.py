@@ -5,8 +5,9 @@
 
 import math
 import torch
+from torch import Tensor
 import torch.nn.functional as F
-from typing import Tuple
+from typing import Tuple, Any
 
 class _LearnedNonlin(torch.autograd.Function):
 
@@ -133,8 +134,114 @@ class Conv1dCompressed(torch.nn.Module):
 
 
 
-class _Normalize(torch.autograd.Function):
+def AuxLossWrapper(x, func, include_orig_loss: bool):
+    """
+     Args:
+         x: The input, which you only want the main objective function to
+            be backpropped to.  (i.e. it gets the derivative w.r.t. the
+            return value y, but not the derivative from `aux_loss`).
+      func: A function or other callable object (e.g. torch.nn.Module) where f(x)
+            will return (y, aux_loss) with aux_loss an auxiliary loss function as
+            a scalar Tensor.  This function will return y.  It will be as if you
+            replaced the original loss function with `aux_loss` (or added
+            them together, if include_orig_loss==True), in terms of its affects
+            on the derivatives of quantities implicitly passed in via `func`.
+include_orig_loss:  If true, the original loss (that we are backpropping
+            conventionally) will also be propagated to leaf nodes that
+            are accessed implicitly via `func`.  If false, just the aux_loss
+            will affect their derivatives.
+     Return:
+            Returns y, which is the first element returned by func(x).  But
+            the second value returned by func(x) will be treated as a loss function
+            and will affect all gradients that do *not* pass through x.
+            (e.g. neural net parameters used by `func` will have their .grad
+            affected by `aux_loss`.)
+        """
+    return _AuxLossWrapper.apply(x, func, include_orig_loss)
 
+class _AuxLossWrapper(torch.autograd.Function):
+    """
+    This is for when you have an auxiliary objective function whose
+    derivatives you only want to be respected for some subset of
+    parameters, e.g. those in a module.   This is intended to
+    be used only in AuxLossWrapper().
+    """
+    @staticmethod
+    def forward(ctx, x: Tensor, func: Any, include_orig_loss: bool) -> Tensor:
+        """
+        Args:
+          ctx: The context object for backprop
+            x: The input, which you only want the main objective function to
+               be backpropped to.  (i.e. it gets the derivative w.r.t. the
+               return value y, but not the derivative from `aux_loss`).
+         func: A function or other callable object (e.g. torch.nn.Module) where f(x)
+               will return (y, aux_loss) with aux_loss an auxiliary loss function as
+               a scalar Tensor.  This function will return y.  It will be as if you
+               added `aux_loss` to the overall loss function, but its derivatives are
+               only added to the tensors that come in implicitly via `func` (e.g.
+               neural network parameters), and `aux_loss` will have no effect on
+               the derivatives w.r.t. x.
+ include_orig_loss:  If true, the original loss will be included in the derivatives
+               w.r.t. any parameters impliciitly passed in via `func`.  If false,
+               only the auxiliary objective will be used to train them.
+        Return:
+               Returns y, which is the first element returned by func(x).  But
+               the second value returned by func(x) will be treated as a loss function
+               and will affect all gradients that do *not* pass through x.
+               (e.g. neural net parameters used by `func` will have their .grad
+               affected by `aux_loss`.)
+        """
+        orig_requires_grad = x.requires_grad
+        x = x.detach()
+        x.requires_grad = orig_requires_grad
+        ctx.include_orig_loss = include_orig_loss
+        with torch.enable_grad():
+            # by saving these as names, instead of with save_for_backward(), we
+            # store them as actual Python objects with nothing stripped out.
+            # We retain the graph here..
+            ctx.x = x
+            (ctx.y, ctx.aux_loss) = func(x)
+            # We will need the grad_fn on `y` in the backward pass, so we create
+            # a new copy of it because returning from this object will cause
+            # the grad_fn to be set to our `backward`.
+            return ctx.y.detach()
+
+    def backward(ctx, y_deriv: Tensor) -> Tuple[Tensor,None,None]:
+        with torch.enable_grad():
+            device = ctx.x.device
+            aux_loss_deriv = torch.Tensor([1.0])[0].to(device=ctx.x.device)
+
+            # Temporarily set requires_grad=False for x (our version of x is a leaf because
+            # we did .detach()...  this will disable the next call to "backward" from
+            # propagating the gradient to it (we don't need that gradient, we want the
+            # gradient with only the ctx.y part).
+            ctx.x.requires_grad=False
+
+            # Note: the reason we do torch.autograd.backward with one call including
+            # the y and aux_loss parts, even though we will later have to redo the
+            # `y` part, is that we hope to avoid repetition of computations.. whether
+            # or not this actually saves time will depend on the graph structure.
+            if ctx.include_orig_loss:
+                torch.autograd.backward([ctx.y, ctx.aux_loss],
+                                        grad_tensors=[y_deriv, aux_loss_deriv],
+                                        retain_graph=True)
+            else:
+                torch.autograd.backward(ctx.aux_loss, retain_graph=True)
+
+            if ctx.needs_input_grad[0]:
+                # retain_graph=True below is in case the user had retain_graph=True in
+                # the outer backprop.  It's OK; once this object is let go of, this part
+                # of the graph will be freed.
+                ctx.x.requires_grad=True
+                (x_grad,) = torch.autograd.grad([ctx.y], [ctx.x], grad_outputs=[y_deriv],
+                                                retain_graph=True)
+                return (x_grad, None, None)
+            else:
+                return (None, None, None)
+
+
+
+class _Normalize(torch.autograd.Function):
     @staticmethod
     def forward(ctx, x: torch.Tensor, eps: float, alpha: float, dim: int) -> torch.Tensor:
         """
@@ -174,6 +281,18 @@ class _Normalize(torch.autograd.Function):
 
         return x_grad, None, None, None
 
+def normalize_simple(x: torch.Tensor, eps: float, alpha: float, dim: int) -> torch.Tensor:
+    """
+    This is like _Normalize.apply(...) except it uses Torch's native autograd, which
+    may be a bit less memory efficient but more time efficient.  It is for testing
+    purposes, see test_normalize().
+    """
+    scales = (x*x).sum(dim, keepdim=True)
+    scales = scales + eps
+    scales = scales ** -0.5
+    scales = scales * alpha
+    return x * scales
+
 
 def test_normalize():
     x = torch.outer(torch.arange(10), torch.arange(1.,6.)).detach()
@@ -189,6 +308,7 @@ def test_normalize():
     print(f'With ref method: x={x}, b={b}, x_grad={x.grad}')
     assert torch.allclose(xgrad1, x.grad)
 
+
 class Normalize(torch.nn.Module):
     """
     This is like LayerNorm (but without the offset part, only the variance
@@ -197,7 +317,18 @@ class Normalize(torch.nn.Module):
     is after Kaldi's NormalizeLayer.
     """
 
-    def __init__(self, num_features, dim=1, eps=1.0e-05, affine=True):
+    def __init__(self, num_features, dim=1, eps=1.0e-05,
+                 affine=True):
+        """
+        Constructor
+          num_features:  Number of features, e.g. 256, over which
+                        we normalize
+          dim:          The dimension of the input that corresponds
+                        to the feature dimension (may be negative)
+          eps:          Epsilon to prevent division by zero
+          affine:       If true, include offset and weight parameters
+        """
+
         super(Normalize, self).__init__()
         self.num_features = num_features
         self.dim = dim
@@ -231,6 +362,78 @@ class Normalize(torch.nn.Module):
         return x
 
 
+class SlowBatchnorm(torch.nn.Module):
+    """
+    This ensures that its output is close to having zero mean and unit stddev,
+    by adding a weight and a bias.
+    The weight and bias are trained so as to minimize an auxiliary objective that encourages
+    the output to be zero-mean.  It's best if you follow this layer with
+    something that has a conventionally trainable offset/bias, to retain modeling power.
+    We suggest following this with NormalizeLayer, which due to this LayerNorm component
+    has the additional advantage of keeping the output bounded which will avoid some
+    types of divergence.
+    """
+    def __init__(self, num_features, dim=1,
+                 normalize_scale=0.1):
+        """
+        Constructor
+          num_features:  Number of features, e.g. 256, over which
+                        we normalize
+          dim:          The dimension of the input that corresponds
+                        to the feature dimension (may be negative)
+          normalize_scale:  Scale that affects the magnitude of the
+                        derivatives.   (Note:
+
+
+                        that scales the objective function.
+                        Note: we first divide by the number of vectors
+                        being normalized, then the auxiliary objective is the
+                        sum-of-squares of the mean times normalize_scale.
+                        You should aim that the scale of this is comparable
+                        with the scale of the objective function you are
+                        training with.
+        """
+        super(SlowBatchnorm, self).__init__()
+        self.bias = torch.nn.Parameter(torch.empty(num_features))
+        self.weight = torch.nn.Parameter(torch.empty(num_features))
+        self.dim = dim
+        self.normalize_scale = normalize_scale
+        self.reset_parameters()
+
+    def reset_parameters(self):
+        init = torch.nn.init
+        init.constant_(self.bias, 0.)
+        init.constant_(self.weight, 1.)
+
+    def forward(self, x):
+        num_features = self.bias.numel()
+        assert x.shape[self.dim] == num_features
+        bias = self.bias
+        weight = self.weight
+        num_vecs = x.numel() / num_features
+        dim = self.dim
+        if dim < 0:
+            dim += x.ndim
+        for _ in range(dim, x.ndim - 1):
+            bias = bias.unsqueeze(-1)
+            weight = weight.unsqueeze(-1)
+        normalize_scale = self.normalize_scale
+        def _forward(x: Tensor) -> Tuple[Tensor,Tensor]:
+            """Returns a pair (y, aux_loss); this becomes the
+            'func' passed to AuxLossWrapper().
+            """
+            y = (x * weight) + bias
+            dim_to_normalize=dim
+            ymean = torch.sum(y, dim=[ i for i in range(y.ndim)
+                                       if i != dim_to_normalize ]) * (1.0 / num_vecs)
+
+            y2mean = torch.sum(y**2, dim=[ i for i in range(y.ndim)
+                                           if i != dim_to_normalize ]) * (1.0 / num_vecs)
+            aux_loss = ((ymean**2).sum() + ((y2mean - 1.0) ** 2).sum()) * normalize_scale
+            return (y, aux_loss)
+        return AuxLossWrapper(x, _forward, False)
+
+
 class ConvModule(torch.nn.Module):
     """ this is resnet-like."""
     def __init__(self, idim, odim,
@@ -242,13 +445,19 @@ class ConvModule(torch.nn.Module):
               LearnedNonlin(),
               torch.nn.Dropout(dropout),
               Conv1dCompressed(hidden_dim),
+              SlowBatchnorm(num_features=hidden_dim, dim=1),
               Normalize(num_features=hidden_dim, dim=1, affine=True),
               LearnedNonlin(),
-              torch.nn.Conv1d(hidden_dim, odim, stride=stride, kernel_size=1, bias=False) ])
+              torch.nn.Conv1d(hidden_dim, odim, stride=stride, kernel_size=1, bias=False),
+              SlowBatchnorm(num_features=hidden_dim, dim=1) ])
 
+        # keep self.norm separate, we initialize it in reset_parameters().
         self.norm = Normalize(num_features=odim, dim=1, affine=True)
 
-        self.final_norm = Normalize(num_features=odim, dim=1, affine=True)
+        self.final_norm = torch.nn.Sequential(
+            SlowBatchnorm(num_features=hidden_dim, dim=1),
+            Normalize(num_features=odim, dim=1, affine=True))
+
 
         if stride != 1 or odim != idim:
             self.bypass_conv = torch.nn.Conv1d(odim, idim, stride=stride,
@@ -287,9 +496,22 @@ def test_conv():
     print("output = ", output)
 
 
+def test_slow_batchnorm():
+    for n in (-1,1):
+        print("With n = ", n)
+        x = torch.ones(10,11) * ((n) ** torch.arange(10).unsqueeze(1))
+        x.requires_grad = True
+        b = SlowBatchnorm(11, dim=1, normalize_scale=1.0)
+        y = b(x)
+        objf = y.sum() * 1.0e-20
+        objf.backward()
+        print(f"x={x}, y={y}, x-grad = {x.grad}, bias_grad={b.bias.grad}, weight_grad={b.weight.grad}")
+
+
 def main():
     test_conv()
     test_normalize()
+    test_slow_batchnorm()
 
     n = LearnedNonlin()
     a = torch.randn(10,10).detach()
