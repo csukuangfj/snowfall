@@ -6,6 +6,7 @@
 import math
 import torch
 import torch.nn.functional as F
+from typing import Tuple
 
 class _LearnedNonlin(torch.autograd.Function):
 
@@ -102,7 +103,7 @@ class Conv1dCompressed(torch.nn.Module):
         if bias:
             self.bias = torch.nn.Parameter(torch.empty(out_channels))
         else:
-            self.register_parameter('bias', None)
+
         self.reset_parameters()
 
     def reset_parameters(self):
@@ -131,6 +132,96 @@ class Conv1dCompressed(torch.nn.Module):
 
 
 
+class _Normalize(torch.autograd.Function):
+
+    @staticmethod
+    def forward(ctx, x: torch.Tensor, eps: float, alpha: float, dim: int) -> torch.Tensor:
+        """
+        View all dimensions of x except `dim` as the batch dimension,
+        treating all the resulting x's as separate vectors.   We aim
+        to normalize each such x_vec to have unit scale (after using eps as ballast),
+        i.e.  x_vec -> x_vec * (alpha / sqrt(x_vec.x_vec + eps)).
+        """
+        x = x.detach()
+        scales = (x**2).sum(dim, keepdim=True)
+        scales.add_(eps)
+        scales.pow_(-0.5)
+        scales.mul_(alpha)
+        ctx.save_for_backward(x, scales)
+        ctx.dim = dim
+        ctx.alpha = alpha
+        return x * scales
+
+    @staticmethod
+    def backward(ctx, output_grad: torch.Tensor) -> Tuple[torch.Tensor,None,None,None]:
+        output_grad = output_grad.detach()
+        x, scales = ctx.saved_tensors
+        scales_grad = (x * output_grad).sum(ctx.dim, keepdim=True)
+
+        # scales = alpha * (sums + eps)^{-0.5}
+        # dscales/dsums = alpha * -0.5 * (sums + eps)^{-1.5)
+        #               = (-0.5/alpha^2) * scales**3.
+        # -->   sums_grad = scales_grad * ((-0.5/alpha) * scales**3)
+        twice_sums_grad = scales_grad * ((-1.0/(ctx.alpha*ctx.alpha)) * scales**3)
+
+        # now: sum_i = (x_i . x_i), so d(sum_i)/d(x_i) = 2 * x_i.
+        # so: x_grad += 2 * sums_grad * x
+        #  or: x_grad += twice_sums_grad * x
+
+        x_grad = output_grad * scales + \
+                 twice_sums_grad * x
+
+        return x_grad, None, None, None
+
+
+def test_normalize():
+    x = torch.outer(torch.arange(10), torch.arange(1.,6.)).detach()
+    x.requires_grad = True
+    b = _Normalize.apply(x, 1.0e-05, math.sqrt(5), 1)
+    b.sum().backward()
+    xgrad1 = x.grad.clone()
+    print(f'x={x}, b={b}, x_grad={x.grad}')
+
+    x.grad = None
+    b = normalize_simple(x, 1.0e-05, math.sqrt(5), 1)
+    b.sum().backward()
+    print(f'With ref method: x={x}, b={b}, x_grad={x.grad}')
+    assert torch.allclose(xgrad1, x.grad)
+
+class Normalize(torch.nn.Module):
+    """
+    This is like LayerNorm (but without the offset part, only the variance
+    part), but acting on a configurable.  dimension (not necessarily the last
+    dim).  It also has affine (weight/bias) parameters, optionally.  The naming
+    is after Kaldi's NormalizeLayer.
+    """
+
+    def __init__(self, num_features, dim=1, eps=1.0e-05, affine=True):
+        self.num_features = num_features
+        self.alpha = math.sqrt(self.num_features)
+        if affine:
+            self.weight = torch.nn.Parameter(torch.empty(num_features))
+            self.bias = torch.nn.Parameter(torch.empty(num_features))
+        else:
+            self.register_parameter('weight', None)
+            self.register_parameter('bias', None)
+        self.eps = eps
+        self.reset_parameters()
+
+
+    def reset_parameters():
+        init = torch.nn.init
+        init.constant_(self.bias, 0.)
+        init.constant_(self.weight, 0.)
+
+    def forward(x):
+        assert x.shape[dim] == self.num_features
+        x = _Normalize.apply(x, self.eps, self.alpha, self.dim)
+        if self.weight is not None:
+            x = (x * self.weight) + self.bias
+        return x
+
+
 class ConvModule(torch.nn.Module):
     """ this is resnet-like."""
     def __init__(self, idim, odim,
@@ -142,13 +233,13 @@ class ConvModule(torch.nn.Module):
               LearnedNonlin(),
               torch.nn.Dropout(dropout),
               Conv1dCompressed(hidden_dim),
-              torch.nn.BatchNorm1d(num_features=hidden_dim, affine=True),
+              Normalize(num_features=hidden_dim, dim=1, affine=True),
               LearnedNonlin(),
               torch.nn.Conv1d(hidden_dim, odim, stride=stride, kernel_size=1, bias=False) ])
 
-        self.norm = torch.nn.BatchNorm1d(num_features=odim, affine=True)
+        self.norm = Normalize(num_features=odim, dim=1, affine=True)
 
-        self.final_norm = torch.nn.BatchNorm1d(num_features=odim, affine=True)
+        self.final_norm = Normalize(num_features=odim, dim=1, affine=True)
 
         if stride != 1 or odim != idim:
             self.bypass_conv = torch.nn.Conv1d(odim, idim, stride=stride,
@@ -189,6 +280,7 @@ def test_conv():
 
 def main():
     test_conv()
+    test_normalize()
 
     n = LearnedNonlin()
     a = torch.randn(10,10).detach()

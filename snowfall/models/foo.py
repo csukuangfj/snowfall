@@ -6,7 +6,7 @@ from torch.utils.tensorboard import SummaryWriter
 from typing import Tuple
 
 from snowfall.models import AcousticModel
-from snowfall.models.modules import ConvModule
+from snowfall.models.modules import ConvModule, Normalize
 from snowfall.training.diagnostics import measure_weight_norms
 
 
@@ -29,18 +29,24 @@ class Foo(AcousticModel):
         self.num_classes = num_classes
         self.subsampling_factor = 4
 
-        self.input_layers = nn.Sequential(
+
+        self.input_layers = nn.Sequential([
             nn.Conv1d(in_channels=num_features,
                       out_channels=dim,
                       kernel_size=3,
                       stride=1,
                       padding=1), nn.ReLU(inplace=True),
-            nn.BatchNorm1d(num_features=dim, affine=False),
+            nn.Conv1d(in_channels=num_features,
+                      out_channels=dim,
+                      kernel_size=3,
+                      stride=1,
+                      padding=1), nn.ReLU(inplace=True),
             nn.Conv1d(in_channels=dim,
                       out_channels=dim,
                       kernel_size=3,
                       stride=2,
-                      padding=1), nn.ReLU(inplace=True))
+                      padding=1), nn.ReLU(inplace=True),
+            Normalize(num_features=dim, dim=1)]
 
         self.layers_before_subsample2 = nn.Sequential(* [ ConvModule(dim, dim, hidden_dim, dropout=dropout) for
                                                         _ in range(num_layers[0]) ])

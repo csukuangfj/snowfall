@@ -242,7 +242,7 @@ def main():
     num_epochs = 10
     use_adam = True
 
-    exp_dir = f'exp-lstm-adam-mmi-bigram-musan-foo-pass2'
+    exp_dir = f'exp-lstm-adam-mmi-bigram-musan-foo-ln'
     setup_logger('{}/log/log-train'.format(exp_dir), use_console=args.local_rank == 0)
     tb_writer = SummaryWriter(log_dir=f'{exp_dir}/tensorboard') if args.local_rank == 0 else None
 
@@ -332,7 +332,7 @@ def main():
     model.P_scores = nn.Parameter(P.scores.clone(), requires_grad=True)
 
 
-    if True:  # This block loads permanent parameters..
+    if False:  # This block loads permanent parameters..
         last_model = 'exp-lstm-adam-mmi-bigram-musan-foo/epoch-8.pt'
         state_dict = torch.load(last_model, map_location=torch.device('cpu'))['state_dict']
 
