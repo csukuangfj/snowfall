@@ -30,7 +30,6 @@ class Foo(AcousticModel):
         self.num_classes = num_classes
         self.subsampling_factor = 4
 
-
         self.input_layers = nn.Sequential(
             nn.Conv1d(in_channels=num_features,
                       out_channels=dim,

@@ -376,6 +376,9 @@ def run(rank, world_size, args):
                 num_layers=(5,20),
                 initial_batchnorm_scale=0.1,
                 hidden_dim=256)
+    for name,module in model.named_modules():
+        module.name = name
+
 
     model.P_scores = nn.Parameter(P.scores.clone(), requires_grad=True)
 

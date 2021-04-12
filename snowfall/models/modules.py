@@ -3,7 +3,9 @@
 # Copyright (c)  2021  University of Chinese Academy of Sciences (author: Han Zhu)
 # Apache 2.0
 
+import logging
 import math
+import random
 import torch
 from torch import Tensor
 import torch.nn.functional as F
@@ -209,7 +211,6 @@ class _AuxLossWrapper(torch.autograd.Function):
     def backward(ctx, y_deriv: Tensor) -> Tuple[Tensor,None,None]:
         with torch.enable_grad():
             device = ctx.x.device
-            aux_loss_deriv = torch.Tensor([1.0])[0].to(device=ctx.x.device)
 
             # Temporarily set requires_grad=False for x (our version of x is a leaf because
             # we did .detach()...  this will disable the next call to "backward" from
@@ -217,11 +218,12 @@ class _AuxLossWrapper(torch.autograd.Function):
             # gradient with only the ctx.y part).
             ctx.x.requires_grad=False
 
-            # Note: the reason we do torch.autograd.backward with one call including
-            # the y and aux_loss parts, even though we will later have to redo the
-            # `y` part, is that we hope to avoid repetition of computations.. whether
-            # or not this actually saves time will depend on the graph structure.
             if ctx.include_orig_loss:
+                # Note: the reason we do torch.autograd.backward with one call including
+                # the y and aux_loss parts, even though we will later have to redo the
+                # `y` part, is that we hope to avoid repetition of computations.. whether
+                # or not this actually saves time will depend on the graph structure.
+                aux_loss_deriv = torch.Tensor([1.0])[0].to(device=ctx.x.device)
                 torch.autograd.backward([ctx.y, ctx.aux_loss],
                                         grad_tensors=[y_deriv, aux_loss_deriv],
                                         retain_graph=True)
@@ -362,7 +364,7 @@ class Normalize(torch.nn.Module):
         return x
 
 
-class SlowBatchnorm(torch.nn.Module):
+class SlowBatchnormOld(torch.nn.Module):
     """
     This ensures that its output is close to having zero mean and unit stddev,
     by adding a weight and a bias.
@@ -393,7 +395,7 @@ class SlowBatchnorm(torch.nn.Module):
                         with the scale of the objective function you are
                         training with.
         """
-        super(SlowBatchnorm, self).__init__()
+        super(SlowBatchnormOld, self).__init__()
         self.bias = torch.nn.Parameter(torch.empty(num_features))
         self.weight = torch.nn.Parameter(torch.empty(num_features))
         self.dim = dim
@@ -407,6 +409,9 @@ class SlowBatchnorm(torch.nn.Module):
 
     def forward(self, x):
         num_features = self.bias.numel()
+        if x.shape[self.dim] != num_features:
+            raise ValueError(f'Expected element {self.dim} of shape {x.shape} '
+                             f'to equal {num_features}')
         assert x.shape[self.dim] == num_features
         bias = self.bias
         weight = self.weight
@@ -430,8 +435,90 @@ class SlowBatchnorm(torch.nn.Module):
             y2mean = torch.sum(y**2, dim=[ i for i in range(y.ndim)
                                            if i != dim_to_normalize ]) * (1.0 / num_vecs)
             aux_loss = ((ymean**2).sum() + ((y2mean - 1.0) ** 2).sum()) * normalize_scale
+            if random.random() < 0.001:
+                try:
+                    name = self.name
+                except:
+                    name = '<unknown name>'
+                ymean_mean = ymean.mean().detach()
+                ymean_stddev = ((ymean**2).mean() - (ymean_mean**2)).sqrt()
+                y2mean_mean = y2mean.mean().detach()
+                logging.info(f"name={name}: ymean mean,stddev={ymean_mean},{ymean_stddev}, y2mean mean={y2mean_mean}")
             return (y, aux_loss)
         return AuxLossWrapper(x, _forward, False)
+
+
+class SlowBatchnorm(torch.nn.Module):
+    """
+    This is like regular batchnorm except it uses stats summed from the start of training
+    until now (with persistent buffers).  This is so it will remain consistent when,
+    for example, we are processing inputs with various lengths or otherwise non-i.i.d.
+    minibatches.
+    """
+    def __init__(self, num_features, dim=1, eps=1.0e-08, affine=True):
+        """
+        Constructor
+          num_features:  Number of features, e.g. 256, over which
+                        we normalize
+          dim:          The dimension of the input that corresponds
+                        to the feature dimension (may be negative)
+          eps:          Value to prevent division by zero
+         affine:        If true, will follow batchnorm by trainable
+                        per-element weight and bias
+        """
+        super(SlowBatchnorm, self).__init__()
+
+        self.register_buffer('count', torch.zeros(1, dtype=torch.double))
+        self.register_buffer('running_mean', torch.zeros(num_features,
+                                                         dtype=torch.double))
+        self.register_buffer('running_var', torch.zeros(num_features,
+                                                        dtype=torch.double))
+        if affine:
+            self.bias = torch.nn.Parameter(torch.empty(num_features))
+            self.weight = torch.nn.Parameter(torch.empty(num_features))
+        else:
+            self.register_parameter('bias', None)
+            self.register_parameter('weight', None)
+
+        self.dim = dim
+        self.eps = eps
+        self.reset_parameters()
+
+    def reset_parameters(self):
+        init = torch.nn.init
+        init.constant_(self.bias, 0.)
+        init.constant_(self.weight, 1.)
+
+    def forward(self, x):
+        if self.training:
+            with torch.no_grad():
+                num_features = self.bias.numel()
+                num_vecs = x.numel() / num_features
+                self.count += num_vecs
+
+                xsum = torch.sum(x, dim=[ i for i in range(x.ndim)
+                                           if i != self.dim])
+                x2sum = torch.sum(x**2, dim=[ i for i in range(x.ndim)
+                                              if i != self.dim])
+                self.running_mean.add_(xsum)
+                self.running_var.add_(x2sum)
+        x_avg = self.running_mean / self.count
+        x2_avg = torch.maximum(self.running_var / self.count - x_avg**2,
+                               torch.tensor([self.eps], device=x.device))
+        x_avg, x2_avg = x_avg.to(dtype=torch.float), x2_avg.to(dtype=torch.float)
+        weight = x2_avg ** -0.5
+        bias = -x_avg * weight
+        if self.bias is not None:
+            bias = self.bias + bias * self.weight
+            weight = weight * self.weight
+        dim = self.dim
+        if dim < 0:
+            dim += x.ndim
+        for _ in range(dim, x.ndim - 1):
+            bias = bias.unsqueeze(-1)
+            weight = weight.unsqueeze(-1)
+        return (x * weight) + bias
+
 
 
 class ConvModule(torch.nn.Module):
@@ -449,13 +536,13 @@ class ConvModule(torch.nn.Module):
               Normalize(num_features=hidden_dim, dim=1, affine=True),
               LearnedNonlin(),
               torch.nn.Conv1d(hidden_dim, odim, stride=stride, kernel_size=1, bias=False),
-              SlowBatchnorm(num_features=hidden_dim, dim=1) ])
+              SlowBatchnorm(num_features=odim, dim=1) ])
 
         # keep self.norm separate, we initialize it in reset_parameters().
         self.norm = Normalize(num_features=odim, dim=1, affine=True)
 
         self.final_norm = torch.nn.Sequential(
-            SlowBatchnorm(num_features=hidden_dim, dim=1),
+            SlowBatchnorm(num_features=odim, dim=1),
             Normalize(num_features=odim, dim=1, affine=True))
 
 
@@ -496,21 +583,34 @@ def test_conv():
     print("output = ", output)
 
 
-def test_slow_batchnorm():
+def test_slow_batchnorm_old():
     for n in (-1,1):
         print("With n = ", n)
         x = torch.ones(10,11) * ((n) ** torch.arange(10).unsqueeze(1))
         x.requires_grad = True
-        b = SlowBatchnorm(11, dim=1, normalize_scale=1.0)
+        b = SlowBatchnormOld(11, dim=1, normalize_scale=1.0)
         y = b(x)
         objf = y.sum() * 1.0e-20
         objf.backward()
         print(f"x={x}, y={y}, x-grad = {x.grad}, bias_grad={b.bias.grad}, weight_grad={b.weight.grad}")
 
 
+def test_slow_batchnorm():
+    for n in (-1,1):
+        print("With n = ", n, ", in test_slow_batchnorm")
+        x = torch.ones(10,11) * ((n) ** torch.arange(10).unsqueeze(1))
+        x.requires_grad = True
+        b = SlowBatchnorm(11, dim=1)
+        y = b(x)
+        objf = y.sum() * 1.0e-20
+        objf.backward()
+        print(f"x={x}, y={y}")
+
+
 def main():
     test_conv()
     test_normalize()
+    test_slow_batchnorm_old()
     test_slow_batchnorm()
 
     n = LearnedNonlin()
