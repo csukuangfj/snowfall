@@ -278,6 +278,11 @@ def get_parser():
         default=1,
         help='Number of GPUs for DDP training.')
     parser.add_argument(
+        '--master-port',
+        type=int,
+        default=12354,
+        help='Master port to use for DDP training.')
+    parser.add_argument(
         '--num-epochs',
         type=int,
         default=10,
@@ -330,7 +335,7 @@ def run(rank, world_size, args):
     den_scale = args.den_scale
 
     fix_random_seed(42)
-    setup_dist(rank, world_size)
+    setup_dist(rank, world_size, args.master_port)
 
     exp_dir = Path('exp-foo-noam-mmi-musan-sa')
     setup_logger(f'{exp_dir}/log/log-train-{rank}')
