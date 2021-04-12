@@ -358,7 +358,7 @@ def main():
     describe(model)
 
     optimizer = Noam(model.parameters(),
-                     model_size=256
+                     model_size=256,
                      factor=1.0,
                      warm_step=args.warm_step)
 
