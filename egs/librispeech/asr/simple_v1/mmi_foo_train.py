@@ -14,6 +14,7 @@ import numpy as np
 import os
 import sys
 import torch
+import torch.optim as optim
 import torch.multiprocessing as mp
 from datetime import datetime
 from pathlib import Path
