@@ -314,7 +314,7 @@ def test_normalize():
 class Normalize(torch.nn.Module):
     """
     This is like LayerNorm (but without the offset part, only the variance
-    part), but acting on a configurable.  dimension (not necessarily the last
+    part), but acting on a configurable dimension (not necessarily the last
     dim).  It also has affine (weight/bias) parameters, optionally.  The naming
     is after Kaldi's NormalizeLayer.
     """
@@ -455,7 +455,9 @@ class SlowBatchnorm(torch.nn.Module):
     for example, we are processing inputs with various lengths or otherwise non-i.i.d.
     minibatches.
     """
-    def __init__(self, num_features, dim=1, eps=1.0e-08, affine=True):
+    def __init__(self, num_features, dim=1, eps=1.0e-08,
+                 momentum=0.9, cur_proportion=0.25,
+                 affine=True):
         """
         Constructor
           num_features:  Number of features, e.g. 256, over which
@@ -463,6 +465,10 @@ class SlowBatchnorm(torch.nn.Module):
           dim:          The dimension of the input that corresponds
                         to the feature dimension (may be negative)
           eps:          Value to prevent division by zero
+        momentum:       Controls recency of moving-average mean,var stats
+   cur_proportion:      The proportion of the batchnorm stats on each frame
+                        that are made up of the current minibatch (the rest
+                        will be the moving average from previous minibatches).
          affine:        If true, will follow batchnorm by trainable
                         per-element weight and bias
         """
@@ -482,6 +488,8 @@ class SlowBatchnorm(torch.nn.Module):
 
         self.dim = dim
         self.eps = eps
+        self.momentum = momentum
+        self.cur_proportion = cur_proportion
         self.reset_parameters()
 
     def reset_parameters(self):
@@ -491,19 +499,32 @@ class SlowBatchnorm(torch.nn.Module):
 
     def forward(self, x):
         if self.training:
-            with torch.no_grad():
-                num_features = self.bias.numel()
-                num_vecs = x.numel() / num_features
-                self.count += num_vecs
+            num_features = self.bias.numel()
+            count = x.numel() / num_features
+            xsum = torch.sum(x, dim=[ i for i in range(x.ndim)
+                                      if i != self.dim])
+            x2sum = torch.sum(x**2, dim=[ i for i in range(x.ndim)
+                                          if i != self.dim])
 
-                xsum = torch.sum(x, dim=[ i for i in range(x.ndim)
-                                           if i != self.dim])
-                x2sum = torch.sum(x**2, dim=[ i for i in range(x.ndim)
-                                              if i != self.dim])
-                self.running_mean.add_(xsum)
-                self.running_var.add_(x2sum)
-        x_avg = self.running_mean / self.count
-        x2_avg = torch.maximum(self.running_var / self.count - x_avg**2,
+            # `stored_stats_scale` is the scaling factor by which we scale
+            # existing stats to ensure that `cur_proportion` of the total count
+            # is given by the current stats.
+            if self.count == 0:
+                stored_stats_scale = 0.0
+            else:
+                stored_stats_scale = (count / self.count) * (1.0 - self.cur_proportion) / self.cur_proportion
+            if stored_stats_scale > 1.:
+                stored_stats_scale = 1.
+            tot_xsum = self.running_mean * stored_stats_scale + xsum
+            tot_x2sum = self.running_var * stored_stats_scale + x2sum
+            tot_count = self.count * stored_stats_scale + count
+        else:
+            tot_xsum = self.running_mean
+            tot_x2sum = self.running_var
+            tot_count = self.count
+
+        x_avg = tot_xsum / tot_count
+        x2_avg = torch.maximum(tot_x2sum / tot_count - x_avg**2,
                                torch.tensor([self.eps], device=x.device))
         x_avg, x2_avg = x_avg.to(dtype=torch.float), x2_avg.to(dtype=torch.float)
         weight = x2_avg ** -0.5
@@ -517,46 +538,52 @@ class SlowBatchnorm(torch.nn.Module):
         for _ in range(dim, x.ndim - 1):
             bias = bias.unsqueeze(-1)
             weight = weight.unsqueeze(-1)
+
+        if self.training:
+            with torch.no_grad():
+                self.count.mul_(self.momentum)
+                self.running_mean.mul_(self.momentum)
+                self.running_var.mul_(self.momentum)
+                self.count.add_(count)
+                self.running_mean.add_(xsum)
+                self.running_var.add_(x2sum)
         return (x * weight) + bias
+
 
 
 
 class ConvModule(torch.nn.Module):
     """ this is resnet-like."""
     def __init__(self, idim, odim,
-                 hidden_dim, stride=1, dropout=0.0):
+                 hidden_dim, stride=1, dropout=0.0,
+                 initial_batchnorm_scale=0.2):
         super(ConvModule, self).__init__()
 
         self.layers = torch.nn.Sequential(*
             [ torch.nn.Conv1d(idim, hidden_dim, stride=1, kernel_size=1, bias=False),
               LearnedNonlin(),
+              SlowBatchnorm(num_features=hidden_dim, dim=1),
               torch.nn.Dropout(dropout),
               Conv1dCompressed(hidden_dim),
-              SlowBatchnorm(num_features=hidden_dim, dim=1),
-              Normalize(num_features=hidden_dim, dim=1, affine=True),
               LearnedNonlin(),
-              torch.nn.Conv1d(hidden_dim, odim, stride=stride, kernel_size=1, bias=False),
-              SlowBatchnorm(num_features=odim, dim=1) ])
+              SlowBatchnorm(num_features=hidden_dim, dim=1),
+              torch.nn.Conv1d(hidden_dim, odim, stride=stride, kernel_size=1, bias=False) ])
 
-        # keep self.norm separate, we initialize it in reset_parameters().
-        self.norm = Normalize(num_features=odim, dim=1, affine=True)
-
-        self.final_norm = torch.nn.Sequential(
-            SlowBatchnorm(num_features=odim, dim=1),
-            Normalize(num_features=odim, dim=1, affine=True))
-
+        self.final_norm = SlowBatchnorm(num_features=odim, dim=1)
 
         if stride != 1 or odim != idim:
             self.bypass_conv = torch.nn.Conv1d(odim, idim, stride=stride,
                                                kernel_size=1, bias=False)
         else:
             self.register_parameter('bypass_conv', None)
+        self.initial_batchnorm_scale = initial_batchnorm_scale
         self.reset_parameters()
 
     def reset_parameters(self):
         init = torch.nn.init
-        # the following should make it train more easily.
-        init.uniform_(self.norm.weight, 0.25)
+        # the following should make it train more easily..
+        init.uniform_(self.layers[-2].weight,
+                      self.initial_batchnorm_scale)
 
 
     def forward(self, x):
@@ -566,7 +593,6 @@ class ConvModule(torch.nn.Module):
         """
         bypass = self.bypass_conv(x) if self.bypass_conv is not None else x
         x = self.layers(x)
-        x = self.norm(x)
         return self.final_norm(x + bypass)
         return out
 
@@ -596,11 +622,11 @@ def test_slow_batchnorm_old():
 
 
 def test_slow_batchnorm():
+    b = SlowBatchnorm(11, dim=1)
     for n in (-1,1):
         print("With n = ", n, ", in test_slow_batchnorm")
         x = torch.ones(10,11) * ((n) ** torch.arange(10).unsqueeze(1))
         x.requires_grad = True
-        b = SlowBatchnorm(11, dim=1)
         y = b(x)
         objf = y.sum() * 1.0e-20
         objf.backward()

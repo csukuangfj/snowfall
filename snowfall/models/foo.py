@@ -6,7 +6,7 @@ from torch.utils.tensorboard import SummaryWriter
 from typing import Tuple
 
 from snowfall.models import AcousticModel
-from snowfall.models.modules import ConvModule, Normalize
+from snowfall.models.modules import ConvModule, Normalize, SlowBatchnorm
 from snowfall.training.diagnostics import measure_weight_norms
 
 
@@ -36,22 +36,28 @@ class Foo(AcousticModel):
                       kernel_size=3,
                       stride=1,
                       padding=1), nn.ReLU(inplace=True),
+            SlowBatchnorm(num_features=dim, dim=1),
             nn.Conv1d(in_channels=dim,
                       out_channels=dim,
                       kernel_size=3,
                       stride=1,
                       padding=1), nn.ReLU(inplace=True),
+            SlowBatchnorm(num_features=dim, dim=1),
             nn.Conv1d(in_channels=dim,
                       out_channels=dim,
                       kernel_size=3,
                       stride=2,
                       padding=1), nn.ReLU(inplace=True),
-            Normalize(num_features=dim, dim=1))
+            SlowBatchnorm(num_features=dim, dim=1))
 
-        self.layers_before_subsample2 = nn.Sequential(* [ ConvModule(dim, dim, hidden_dim, dropout=dropout) for
+        self.layers_before_subsample2 = nn.Sequential(* [ ConvModule(dim, dim, hidden_dim, dropout=dropout,
+                                                                     initial_batchnorm_scale=initial_batchnorm_scale) for
                                                         _ in range(num_layers[0]) ])
-        self.subsample2 = ConvModule(dim, dim, hidden_dim, dropout=dropout, stride=2)
-        self.layers_after_subsample2 = nn.Sequential(* [ ConvModule(dim, dim, hidden_dim, dropout=dropout) for
+        self.subsample2 = ConvModule(dim, dim, hidden_dim, dropout=dropout,
+                                     initial_batchnorm_scale=initial_batchnorm_scale,
+                                     stride=2)
+        self.layers_after_subsample2 = nn.Sequential(* [ ConvModule(dim, dim, hidden_dim, dropout=dropout,
+                                                                    initial_batchnorm_scale=initial_batchnorm_scale) for
                                                         _ in range(num_layers[1]) ])
 
         self.final_conv1d = nn.Conv1d(dim, num_classes, stride=1, kernel_size=1, bias=True)

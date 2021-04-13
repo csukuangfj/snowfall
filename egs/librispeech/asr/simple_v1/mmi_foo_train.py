@@ -374,7 +374,7 @@ def run(rank, world_size, args):
                 num_classes=len(phone_ids) + 1,  # +1 for the blank symbol
                 dim=256,
                 num_layers=(5,20),
-                initial_batchnorm_scale=0.1,
+                initial_batchnorm_scale=0.08,
                 hidden_dim=256)
     for name,module in model.named_modules():
         module.name = name
@@ -387,10 +387,9 @@ def run(rank, world_size, args):
 
     model = DDP(model, device_ids=[rank])
 
-
     optimizer = Noam(model.parameters(),
                      model_size=256,
-                     factor=1.0,
+                     factor=2.0,
                      warm_step=args.warm_step)
 
     best_objf = np.inf

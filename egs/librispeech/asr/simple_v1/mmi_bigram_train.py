@@ -227,6 +227,7 @@ def get_parser():
     import argparse
     parser = argparse.ArgumentParser()
     parser.add_argument('--world_size', default=1, type=int)
+    parser.add_argument('--master_port', default=12340, type=int)
     parser.add_argument('--local_rank', default=0, type=int)
     parser.add_argument('--bucketing_sampler', type=str2bool, default=True)
     return parser
@@ -235,7 +236,7 @@ def get_parser():
 def main():
     args = get_parser().parse_args()
     print('World size:', args.world_size, 'Rank:', args.local_rank)
-    setup_dist(rank=args.local_rank, world_size=args.world_size)
+    setup_dist(rank=args.local_rank, world_size=args.world_size, master_port=args.master_port)
     fix_random_seed(42)
 
     start_epoch = 0
