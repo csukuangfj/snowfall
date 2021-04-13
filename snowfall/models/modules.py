@@ -549,6 +549,191 @@ class SlowBatchnorm(torch.nn.Module):
                 self.running_var.add_(x2sum)
         return (x * weight) + bias
 
+def SpecialAverage(values: torch.Tensor, weights: torch.Tensor,
+                   eps: float = 1.0e-20) -> torch.Tensor:
+    """
+    Does a special kind of averaging over the time dimension, intended to be
+    a kind of cheap replacement for attention.
+
+    Args:
+     values (corresponds to "v" == values in self-attention):  The values
+         to average.  Of shape (....,T) where T is the time dimension (other
+         dimensions are treated like batch or channel dimension, which is
+         the same..)
+
+   weights:  a Tensor of shape (4,....,T) where the "...." must be identical to
+         the dimensions in `values`.  Its elements should be in the interval
+         [0,1]; we suggest using something.sigmoid().
+
+
+         The interpretations of the 4 components of `weights` are:
+             - forward contributed count, c_f
+             - backward contributed count,  c_b
+             - forward forgetting factor,  f_f
+             - backward forgetting factor, f_b
+         This function computes a recursion as follows (for a single sequence
+         of input values v_t with 0 <= t < T).
+         We compute 'forward total-count' and 'backward total-count' C_f and C_b,
+         and forward and backward total-values X_f and X_b, as follows.
+
+         For t = 0,1,...T-1:
+               C_f(t) = f_f * C_f(t-1)  +  c_f(t)
+               X_f(t) = f_f * X_f(t-1)  +  c_f(t) * v(t)
+         and for t=T-1,T-2,...0:
+               C_b(t) = f_b * C_b(t+1)  +  c_b(t)
+               X_b(t) = f_b * X_b(t+1)  +  c_b(t) * v(t)
+         ... and then the output-average values are computed as:
+
+             y(t) = (X_f(t) + X_b(t)) / (C_f(t) + C_b(t) + eps)
+         All values for t < 0 or t >= T are taken to be zero (to handle recursion
+         edge cases).
+
+     eps:  A small epsilon value intended to prevent division by zero
+    """
+    assert weights.shape[0] == 4
+    assert weights.shape[1:] == values.shape
+    T = weights.shape[-1]
+    shape = values.shape[:-1]   # shape of quantities in the recursion
+
+    c_f = weights[0]  # forward counts
+    c_b = weights[1]  # backward counts
+    f_f = weights[2]  # forward forgetting factor
+    f_b = weights[3]  # backward forgetting factor
+
+    C_f = c_f.clone()
+    X_f = c_f * values
+    C_b = c_b.clone()
+    X_b = c_b * values
+
+    for t in range(1, T):
+        C_f[...,t] += C_f[...,t-1] * f_f[...,t]
+        X_f[...,t] += X_f[...,t-1] * f_f[...,t]
+    for t in range(T-2, -1, -1):
+        C_b[...,t] += C_b[...,t+1] * f_b[...,t]
+        X_b[...,t] += X_b[...,t+1] * f_b[...,t]
+
+    y = (X_f + X_b) / (C_f + C_b + eps)
+    return y
+
+
+class _SpecialAverageRecursion(torch.autograd.Function):
+    """
+    Does a special kind of averaging over the time dimension, intended to be
+    a kind of cheap replacement for attention.
+
+    Args:
+     values (corresponds to "v" == values in self-attention):  The values
+         to average.  Of shape (....,T) where T is the time dimension (other
+         dimensions are treated like batch or channel dimension, which is
+         the same..)
+
+   weights:  a Tensor of shape (4,....,T) where the "...." must be identical to
+         the dimensions in `values`.  Its elements should be in the interval
+         [0,1]; we suggest using something.sigmoid().
+
+
+         The interpretations of the 4 components of `weights` are:
+             - forward contributed count, c_f
+             - backward contributed count,  c_b
+             - forward forgetting factor,  f_f
+             - backward forgetting factor, f_b
+         This function computes a recursion as follows (for a single sequence
+         of input values v_t with 0 <= t < T).
+         We compute 'forward total-count' and 'backward total-count' C_f and C_b,
+         and forward and backward total-values X_f and X_b, as follows.
+
+         For t = 0,1,...T-1:
+               C_f(t) = f_f * C_f(t-1)  +  c_f(t)
+               X_f(t) = f_f * X_f(t-1)  +  c_f(t) * v(t)
+         and for t=T-1,T-2,...0:
+               C_b(t) = f_b * C_b(t+1)  +  c_b(t)
+               X_b(t) = f_b * X_b(t+1)  +  c_b(t) * v(t)
+         ... and then the output-average values are computed as:
+
+             y(t) = (X_f(t) + X_b(t)) / (C_f(t) + C_b(t) + eps)
+         All values for t < 0 or t >= T are taken to be zero (to handle recursion
+         edge cases).
+
+     eps:  A small epsilon value intended to prevent division by zero
+     """
+
+    @staticmethod
+    def forward(ctx, weights, values, eps: float):
+        ctx.eps = eps
+        c_f = weights[0]  # forward counts
+        c_b = weights[1]  # backward counts
+        f_f = weights[2]  # forward forgetting factor
+        f_b = weights[3]  # backward forgetting factor
+        C_f = c_f.clone()
+        X_f = c_f * values
+        C_b = c_b.clone()
+        X_b = c_b * values
+        T = values.shape[-1]
+
+        for t in range(1, T):
+            C_f[...,t] += C_f[...,t-1] * f_f[...,t]
+            X_f[...,t] += X_f[...,t-1] * f_f[...,t]
+        for t in range(T-2, -1, -1):
+            C_b[...,t] += C_b[...,t+1] * f_b[...,t]
+            X_b[...,t] += X_b[...,t+1] * f_b[...,t]
+
+        ctx.save_for_backward(C_f,X_f,C_b,X_b,weights,values)
+
+        y = (X_f + X_b) / (C_f + C_b + eps)
+        return y
+
+    @staticmethod
+    def backward(ctx, y_grad: Tensor) -> (Tensor,Tensor,None):
+
+        C_f,X_f,C_b,X_b,weights,values = ctx.saved_tensors
+        T = values.shape[-1]
+        c_f = weights[0]  # forward counts
+        c_b = weights[1]  # backward counts
+        f_f = weights[2]  # forward forgetting factor
+        f_b = weights[3]  # backward forgetting factor
+
+        # Backprop: y = (X_f + X_b) / (C_f + C_b + eps)
+
+        num = X_f + X_b
+        den = C_f + C_b + ctx.eps
+        inv_den = 1.0 / den
+        inv_den_grad = y_grad * num
+        num_grad = y_grad * inv_den
+        den_grad = -1.0 * (inv_den**2) * inv_den_grad
+
+        X_f_grad = num_grad
+        X_b_grad = num_grad.clone()
+        C_f_grad = den_grad
+        C_b_grad = den_grad.clone()
+
+        c_f_grad = torch.empty_like(num_grad)
+        c_b_grad = torch.empty_like(num_grad)
+        f_f_grad = torch.empty_like(num_grad)
+        f_b_grad = torch.empty_like(num_grad)
+
+        # These commands recap the forward commands in exactly the reverse
+        # direction.
+        for t in range(0,T-1):
+            X_b_grad[...,t+1] += X_b_grad[...,t] * f_b[...,t]
+            f_b_grad[...,t] = X_b_grad[...,t] * X_b[...,t+1]
+            C_b_grad[...,t+1] += C_b_grad[...,t] * f_b[...,t]
+            f_b_grad[...,t] += C_b_grad[...,t] * C_b[...,t+1]
+        for t in range(T-1,0,-1):
+            X_f_grad[...,t-1] += X_f_grad[...,t] * f_b[...,t]
+            f_f_grad[...,t] = X_f_grad[...,t] * X_f[...,t-1]
+            C_f_grad[...,t-1] += C_f_grad[...,t] * f_f[...,t]
+            f_f_grad[...,t] += C_f_grad[...,t] * C_f[...,t-1]
+        f_f_grad[...,0] = 0.
+        f_b_grad[...,T-1] = 0.
+
+        c_f_grad = C_f_grad  # actually assigning objects.. it's an alias, for clarity..
+        c_b_grad = C_b_grad
+        c_f_grad += X_f_grad * values
+        c_b_grad += X_b_grad * values
+        values_grad = X_f_grad * c_f + X_b_grad * c_b
+
+        weights_grad = torch.stack((c_f_grad, c_b_grad, f_f_grad, f_b_grad))
+        return (weights_grad, values_grad, None)
 
 
 
@@ -634,7 +819,57 @@ def test_slow_batchnorm():
         print(f"x={x}, y={y}")
 
 
+def test_special_average():
+    a = torch.ones(3,3) * 0.333
+    a = a.clone()
+    a.requires_grad = True
+    weight = torch.ones(4,3,3) * 0.5
+    weight = weight.clone()
+    weight.requires_grad = True
+
+    y = _SpecialAverageRecursion.apply(weight, a, 1.0e-08)
+    y.sum().backward()
+    print(y.numel(), a.grad.sum())
+    assert torch.allclose(torch.Tensor([1.0*y.numel()]), a.grad.sum())
+
+    print(f"agrad = {a.grad}, weightgrad = {weight.grad}")
+
+
+def test_special_average():
+    torch.set_default_dtype(torch.float64)
+
+    m = 4
+    n = 3
+    a = torch.randn(m,n).clone()
+    a.requires_grad = True
+    weight = torch.randn(4,m,n).sigmoid().clone()
+    weight.requires_grad = True
+
+    y1 = _SpecialAverageRecursion.apply(weight, a, 1.0e-08)
+    out_deriv = torch.randn(m,n)
+    objf1 = (y1*out_deriv).sum()
+    objf1.backward()
+
+    delta = 1.0e-5
+    a_delta = delta * 0.0 * torch.randn(m,n).clone()
+    weight_delta = delta * torch.randn(4,m,n).clone()
+
+    y2 = _SpecialAverageRecursion.apply(weight+weight_delta, a+a_delta, 1.0e-08)
+    objf2 = (y2*out_deriv).sum()
+
+    diff_a = (objf2 - objf1)
+    diff_b = (a_delta * a.grad).sum() + (weight_delta * weight.grad).sum()
+
+    print(f"diff_a={diff_a}, vs diff_b={diff_b}")
+    assert torch.allclose(diff_a, diff_b)
+    torch.set_default_dtype(torch.float32)
+
+
 def main():
+    test_special_average()
+    test_special_average_grad()
+    return
+
     test_conv()
     test_normalize()
     test_slow_batchnorm_old()
