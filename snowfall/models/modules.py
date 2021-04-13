@@ -616,7 +616,7 @@ def SpecialAverage(values: torch.Tensor, weights: torch.Tensor,
     return y
 
 
-class _SpecialAverageRecursion(torch.autograd.Function):
+class _SpecialAverage(torch.autograd.Function):
     """
     Does a special kind of averaging over the time dimension, intended to be
     a kind of cheap replacement for attention.
@@ -658,26 +658,30 @@ class _SpecialAverageRecursion(torch.autograd.Function):
      """
 
     @staticmethod
-    def forward(ctx, weights, values, eps: float):
+    def forward(ctx, values, weights, eps: float):
+        assert weights.shape[0] == 4
+        assert weights.shape[1:] == values.shape
         ctx.eps = eps
         c_f = weights[0]  # forward counts
         c_b = weights[1]  # backward counts
         f_f = weights[2]  # forward forgetting factor
         f_b = weights[3]  # backward forgetting factor
-        C_f = c_f.clone()
-        X_f = c_f * values
-        C_b = c_b.clone()
-        X_b = c_b * values
+        CX_f = torch.stack((c_f, c_f * values))
+        CX_b = torch.stack((c_b, c_b * values))
+        f_f = f_f.unsqueeze(0)
+        f_b = f_b.unsqueeze(0)
         T = values.shape[-1]
-
+        CX_fb = torch.stack((CX_f, torch.flip(CX_b, dims=(-1,))))
+        f_fb = torch.stack((f_f, torch.flip(f_b, dims=(-1,))))
         for t in range(1, T):
-            C_f[...,t] += C_f[...,t-1] * f_f[...,t]
-            X_f[...,t] += X_f[...,t-1] * f_f[...,t]
-        for t in range(T-2, -1, -1):
-            C_b[...,t] += C_b[...,t+1] * f_b[...,t]
-            X_b[...,t] += X_b[...,t+1] * f_b[...,t]
+            CX_fb[...,t] += CX_fb[...,t-1] * f_fb[...,t]
 
-        ctx.save_for_backward(C_f,X_f,C_b,X_b,weights,values)
+        C_f = CX_fb[0,0]
+        X_f = CX_fb[0,1]
+        C_b = CX_fb[1,0].flip(dims=(-1,))
+        X_b = CX_fb[1,1].flip(dims=(-1,))
+
+        ctx.save_for_backward(CX_fb,weights,values)
 
         y = (X_f + X_b) / (C_f + C_b + eps)
         return y
@@ -685,15 +689,18 @@ class _SpecialAverageRecursion(torch.autograd.Function):
     @staticmethod
     def backward(ctx, y_grad: Tensor) -> (Tensor,Tensor,None):
 
-        C_f,X_f,C_b,X_b,weights,values = ctx.saved_tensors
+        CX_fb,weights,values = ctx.saved_tensors
         T = values.shape[-1]
         c_f = weights[0]  # forward counts
         c_b = weights[1]  # backward counts
         f_f = weights[2]  # forward forgetting factor
         f_b = weights[3]  # backward forgetting factor
+        C_f = CX_fb[0,0]
+        X_f = CX_fb[0,1]
+        C_b = CX_fb[1,0].flip(dims=(-1,))
+        X_b = CX_fb[1,1].flip(dims=(-1,))
 
         # Backprop: y = (X_f + X_b) / (C_f + C_b + eps)
-
         num = X_f + X_b
         den = C_f + C_b + ctx.eps
         inv_den = 1.0 / den
@@ -702,29 +709,25 @@ class _SpecialAverageRecursion(torch.autograd.Function):
         den_grad = -1.0 * (inv_den**2) * inv_den_grad
 
         X_f_grad = num_grad
-        X_b_grad = num_grad.clone()
+        X_b_grad = num_grad
         C_f_grad = den_grad
-        C_b_grad = den_grad.clone()
+        C_b_grad = den_grad
+        CX_fb_grad = torch.stack((torch.stack((C_f_grad, X_f_grad)),
+                                  torch.stack((C_b_grad.flip(dims=(-1,)),
+                                               X_b_grad.flip(dims=(-1,))))))
+        f_fb = torch.stack((f_f.unsqueeze(0),
+                            torch.flip(f_b.unsqueeze(0), dims=(-1,))))
+        f_fb_grad = torch.empty_like(f_fb)
 
-        c_f_grad = torch.empty_like(num_grad)
-        c_b_grad = torch.empty_like(num_grad)
-        f_f_grad = torch.empty_like(num_grad)
-        f_b_grad = torch.empty_like(num_grad)
-
-        # These commands recap the forward commands in exactly the reverse
-        # direction.
-        for t in range(0,T-1):
-            X_b_grad[...,t+1] += X_b_grad[...,t] * f_b[...,t]
-            f_b_grad[...,t] = X_b_grad[...,t] * X_b[...,t+1]
-            C_b_grad[...,t+1] += C_b_grad[...,t] * f_b[...,t]
-            f_b_grad[...,t] += C_b_grad[...,t] * C_b[...,t+1]
         for t in range(T-1,0,-1):
-            X_f_grad[...,t-1] += X_f_grad[...,t] * f_b[...,t]
-            f_f_grad[...,t] = X_f_grad[...,t] * X_f[...,t-1]
-            C_f_grad[...,t-1] += C_f_grad[...,t] * f_f[...,t]
-            f_f_grad[...,t] += C_f_grad[...,t] * C_f[...,t-1]
-        f_f_grad[...,0] = 0.
-        f_b_grad[...,T-1] = 0.
+            CX_fb_grad[...,t-1] += CX_fb_grad[...,t] * f_fb[...,t]
+            f_fb_grad[...,t] = (CX_fb_grad[...,t] * CX_fb[...,t-1]).sum(dim=1,keepdims=True)
+        f_fb_grad[...,0] = 0.
+
+        C_f_grad = CX_fb_grad[0,0]
+        X_f_grad = CX_fb_grad[0,1]
+        C_b_grad = CX_fb_grad[1,0].flip(dims=(-1,))
+        X_b_grad = CX_fb_grad[1,1].flip(dims=(-1,))
 
         c_f_grad = C_f_grad  # actually assigning objects.. it's an alias, for clarity..
         c_b_grad = C_b_grad
@@ -732,8 +735,10 @@ class _SpecialAverageRecursion(torch.autograd.Function):
         c_b_grad += X_b_grad * values
         values_grad = X_f_grad * c_f + X_b_grad * c_b
 
+        f_f_grad = f_fb_grad[0][0]
+        f_b_grad = f_fb_grad[1][0].flip(dims=(-1,))
         weights_grad = torch.stack((c_f_grad, c_b_grad, f_f_grad, f_b_grad))
-        return (weights_grad, values_grad, None)
+        return (values_grad, weights_grad, None)
 
 
 
@@ -827,7 +832,7 @@ def test_special_average():
     weight = weight.clone()
     weight.requires_grad = True
 
-    y = _SpecialAverageRecursion.apply(weight, a, 1.0e-08)
+    y = _SpecialAverage.apply(a, weight, 1.0e-08)
     y.sum().backward()
     print(y.numel(), a.grad.sum())
     assert torch.allclose(torch.Tensor([1.0*y.numel()]), a.grad.sum())
@@ -835,26 +840,30 @@ def test_special_average():
     print(f"agrad = {a.grad}, weightgrad = {weight.grad}")
 
 
-def test_special_average():
+def test_special_average_grad():
     torch.set_default_dtype(torch.float64)
 
-    m = 4
+    m = 5
     n = 3
     a = torch.randn(m,n).clone()
     a.requires_grad = True
     weight = torch.randn(4,m,n).sigmoid().clone()
     weight.requires_grad = True
 
-    y1 = _SpecialAverageRecursion.apply(weight, a, 1.0e-08)
+    y1 = _SpecialAverage.apply(a, weight, 1.0e-08)
+    y1b = SpecialAverage(a, weight, 1.0e-08)
+    print(f"y1={y1},y1b={y1b}")
+    assert torch.allclose(y1, y1b)
+
     out_deriv = torch.randn(m,n)
     objf1 = (y1*out_deriv).sum()
     objf1.backward()
 
     delta = 1.0e-5
-    a_delta = delta * 0.0 * torch.randn(m,n).clone()
+    a_delta = delta * torch.randn(m,n).clone()
     weight_delta = delta * torch.randn(4,m,n).clone()
 
-    y2 = _SpecialAverageRecursion.apply(weight+weight_delta, a+a_delta, 1.0e-08)
+    y2 = _SpecialAverage.apply(a+a_delta, weight+weight_delta, 1.0e-08)
     objf2 = (y2*out_deriv).sum()
 
     diff_a = (objf2 - objf1)
