@@ -229,7 +229,7 @@ def get_parser():
     parser.add_argument('--world_size', default=1, type=int)
     parser.add_argument('--master_port', default=12340, type=int)
     parser.add_argument('--local_rank', default=0, type=int)
-    parser.add_argument('--bucketing_sampler', type=str2bool, default=True)
+    parser.add_argument('--bucketing_sampler', type=str2bool, default=False)
     return parser
 
 
@@ -312,7 +312,7 @@ def main():
     #       torch.distributed.all_reduce() tends to hang indefinitely inside
     #       NCCL after ~3000 steps. With the current approach, we can still report
     #       the loss on the full validation set.
-    valid_sampler = BucketingSampler(cuts_dev, max_frames=90000, world_size=1, rank=0)
+    valid_sampler = SingleCutSampler(cuts_dev, max_frames=90000, world_size=1, rank=0)
     logging.info("About to create dev dataloader")
     valid_dl = torch.utils.data.DataLoader(
         validate,

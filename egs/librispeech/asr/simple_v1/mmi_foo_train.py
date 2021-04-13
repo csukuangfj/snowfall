@@ -337,7 +337,7 @@ def run(rank, world_size, args):
     fix_random_seed(42)
     setup_dist(rank, world_size, args.master_port)
 
-    exp_dir = Path('exp-foo-noam-mmi-musan-sa')
+    exp_dir = Path('exp-foo-noam-mmi-musan-sa-rev')
     setup_logger(f'{exp_dir}/log/log-train-{rank}')
     if args.tensorboard and rank == 0:
         tb_writer = SummaryWriter(log_dir=f'{exp_dir}/tensorboard')
