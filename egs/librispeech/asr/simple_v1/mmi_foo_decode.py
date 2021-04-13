@@ -177,7 +177,7 @@ def main():
     epoch = args.epoch
     avg = args.avg
 
-    exp_dir = Path('exp-foo-noam-mmi-musan-sa')
+    exp_dir = Path('exp-foo-noam-mmi-musan-sa-rev')
     setup_logger('{}/log/log-decode'.format(exp_dir), log_level='debug')
 
     # load L, G, symbol_table
@@ -200,7 +200,7 @@ def main():
                 num_classes=len(phone_ids) + 1,  # +1 for the blank symbol
                 dim=256,
                 num_layers=(5,20),
-                initial_batchnorm_scale=0.1,
+                initial_batchnorm_scale=0.08,
                 hidden_dim=256)
 
     model.P_scores = torch.nn.Parameter(P.scores.clone(), requires_grad=False)
