@@ -387,10 +387,24 @@ def run(rank, world_size, args):
 
     model = DDP(model, device_ids=[rank])
 
-    optimizer = Noam(model.parameters(),
-                     model_size=256,
-                     factor=2.0,
-                     warm_step=args.warm_step)
+    if True:
+        learning_rate = 1e-3
+        weight_decay = 5e-4
+        optimizer = optim.AdamW(model.parameters(),
+                                lr=learning_rate,
+                                weight_decay=weight_decay)
+        # Equivalent to the following in the epoch loop:
+        #  if epoch > 6:
+        #      curr_learning_rate *= 0.8
+        lr_scheduler = optim.lr_scheduler.LambdaLR(
+            optimizer,
+            lambda ep: 1.0 if ep < 7 else 0.8 ** (ep - 6)
+        )
+
+    #optimizer = Noam(model.parameters(),
+    #                 model_size=256,
+    #                 factor=2.0,
+    #                 warm_step=args.warm_step)
 
     best_objf = np.inf
     best_valid_objf = np.inf
@@ -401,7 +415,8 @@ def run(rank, world_size, args):
 
     if start_epoch > 0:
         model_path = os.path.join(exp_dir, 'epoch-{}.pt'.format(start_epoch - 1))
-        ckpt = load_checkpoint(filename=model_path, model=model, optimizer=optimizer)
+        ckpt = load_checkpoint(filename=model_path, model=model, optimizer=optimizer,
+                               scheduler=lr_scheduler)
         best_objf = ckpt['objf']
         best_valid_objf = ckpt['valid_objf']
         global_batch_idx_train = ckpt['global_batch_idx_train']
@@ -409,7 +424,7 @@ def run(rank, world_size, args):
 
     for epoch in range(start_epoch, num_epochs):
         train_dl.sampler.set_epoch(epoch)
-        curr_learning_rate = optimizer._rate
+        curr_learning_rate = lr_scheduler.get_last_lr()[0]
         if tb_writer is not None:
             tb_writer.add_scalar('train/learning_rate', curr_learning_rate, global_batch_idx_train)
             tb_writer.add_scalar('train/epoch', epoch, global_batch_idx_train)
@@ -430,6 +445,7 @@ def run(rank, world_size, args):
             num_epochs=num_epochs,
             global_batch_idx_train=global_batch_idx_train,
         )
+        lr_scheduler.step()
         # the lower, the better
         if valid_objf < best_valid_objf:
             best_valid_objf = valid_objf
@@ -460,7 +476,7 @@ def run(rank, world_size, args):
         model_path = os.path.join(exp_dir, 'epoch-{}.pt'.format(epoch))
         save_checkpoint(filename=model_path,
                         optimizer=optimizer,
-                        scheduler=None,
+                        scheduler=lr_scheduler,
                         model=model,
                         epoch=epoch,
                         learning_rate=curr_learning_rate,
