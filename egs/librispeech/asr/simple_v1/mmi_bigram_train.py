@@ -312,7 +312,7 @@ def main():
     #       torch.distributed.all_reduce() tends to hang indefinitely inside
     #       NCCL after ~3000 steps. With the current approach, we can still report
     #       the loss on the full validation set.
-    valid_sampler = SingleCutSampler(cuts_dev, max_frames=90000, world_size=1, rank=0)
+    valid_sampler = BucketingSampler(cuts_dev, max_frames=90000, world_size=1, rank=0)
     logging.info("About to create dev dataloader")
     valid_dl = torch.utils.data.DataLoader(
         validate,

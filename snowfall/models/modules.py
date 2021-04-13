@@ -562,14 +562,14 @@ class ConvModule(torch.nn.Module):
         self.layers = torch.nn.Sequential(*
             [ torch.nn.Conv1d(idim, hidden_dim, stride=1, kernel_size=1, bias=False),
               LearnedNonlin(),
-              SlowBatchnorm(num_features=hidden_dim, dim=1),
               torch.nn.Dropout(dropout),
               Conv1dCompressed(hidden_dim),
+              torch.nn.BatchNorm1d(num_features=hidden_dim, affine=True),
               LearnedNonlin(),
-              SlowBatchnorm(num_features=hidden_dim, dim=1),
               torch.nn.Conv1d(hidden_dim, odim, stride=stride, kernel_size=1, bias=False) ])
 
-        self.final_norm = SlowBatchnorm(num_features=odim, dim=1)
+        self.norm = torch.nn.BatchNorm1d(num_features=odim, affine=True)
+        self.final_norm = torch.nn.BatchNorm1d(num_features=odim, affine=True)
 
         if stride != 1 or odim != idim:
             self.bypass_conv = torch.nn.Conv1d(odim, idim, stride=stride,
@@ -582,7 +582,7 @@ class ConvModule(torch.nn.Module):
     def reset_parameters(self):
         init = torch.nn.init
         # the following should make it train more easily..
-        init.uniform_(self.layers[-2].weight,
+        init.uniform_(self.norm.weight,
                       self.initial_batchnorm_scale)
 
 
@@ -593,6 +593,7 @@ class ConvModule(torch.nn.Module):
         """
         bypass = self.bypass_conv(x) if self.bypass_conv is not None else x
         x = self.layers(x)
+        x = self.norm(x)
         return self.final_norm(x + bypass)
         return out
 

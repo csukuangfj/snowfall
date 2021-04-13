@@ -36,19 +36,18 @@ class Foo(AcousticModel):
                       kernel_size=3,
                       stride=1,
                       padding=1), nn.ReLU(inplace=True),
-            SlowBatchnorm(num_features=dim, dim=1),
+            nn.BatchNorm1d(num_features=dim, affine=False),
             nn.Conv1d(in_channels=dim,
                       out_channels=dim,
                       kernel_size=3,
                       stride=1,
                       padding=1), nn.ReLU(inplace=True),
-            SlowBatchnorm(num_features=dim, dim=1),
+            nn.BatchNorm1d(num_features=dim, affine=False),
             nn.Conv1d(in_channels=dim,
                       out_channels=dim,
                       kernel_size=3,
                       stride=2,
-                      padding=1), nn.ReLU(inplace=True),
-            SlowBatchnorm(num_features=dim, dim=1))
+                      padding=1), nn.ReLU(inplace=True))
 
         self.layers_before_subsample2 = nn.Sequential(* [ ConvModule(dim, dim, hidden_dim, dropout=dropout,
                                                                      initial_batchnorm_scale=initial_batchnorm_scale) for
