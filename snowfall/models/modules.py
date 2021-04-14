@@ -135,6 +135,43 @@ class Conv1dCompressed(torch.nn.Module):
                         padding, self.dilation, self.groups)
 
 
+class Conv1dPlusWeakAttention(torch.nn.Module):
+    """
+    This is a Conv1d, added to WeakAttention (i.e. the outputs of the
+    Conv1d and WeakAttention are added together.
+
+    Note: it inherently has a bias, as the WeakAttention module
+    has one
+    """
+    def __init__(self,
+                 in_channels: int,
+                 out_channels: int,
+                 bottleneck_channels: int,
+                 groups: int = 1,
+                 kernel_size: int = 3,
+                 bias: bool = True):
+        super(Conv1dPlusWeakAttention, self).__init__()
+
+        # No need for bias here, as the WeakAttention module has
+        # a bias.
+        self.conv = torch.nn.Conv1d(in_channels, out_channels,
+                                    kernel_size=kernel_size,
+                                    groups=groups,
+                                    bias=False)
+        self.attn = WeakAttention(in_channels, out_channels,
+                                  bottleneck_channels,
+                                  bias=bias)
+
+
+
+    def forward(self, x):
+        """
+        Input: (N, C, L) = (batch,channel,length)
+        Output: (N, C, L) = (batch,channel,length)
+        """
+        return self.conv(x) + self.attn(x)
+
+
 
 def AuxLossWrapper(x, func, include_orig_loss: bool):
     """
@@ -554,6 +591,10 @@ def SpecialAverage(values: torch.Tensor, weights: torch.Tensor,
     """
     Does a special kind of averaging over the time dimension, intended to be
     a kind of cheap replacement for attention.
+    CAUTION: this does not support backprop, as torch in-place gradient checks
+    prevent that (although it would work if the check could be disabled).
+    Use _SpecialAverage.apply() instead, if you need backprop.  That
+    implementation is more optimized.
 
     Args:
      values (corresponds to "v" == values in self-attention):  The values
@@ -741,11 +782,53 @@ class _SpecialAverage(torch.autograd.Function):
         return (values_grad, weights_grad, None)
 
 
+class WeakAttention(torch.nn.Module):
+    """
+    Something much weaker than regular attention.. aiming for this to possibly  replace
+    attention.
+    """
+    def __init__(self, num_features_in: int, num_features_out: int,
+                 num_features_bottleneck: int,  dim: int = 1,
+                 bias: bool = True, eps: float = 1.0e-10):
+        """
+        Constructor.  Args:
+              num_features_in: number of features at the input
+              num_features_out: number of features at the output
+           num_features_bottleneck:  number of features at an internal
+                 bottleneck we use to limit the number of parameters
+                 devoted to the weights.
+        """
+        super(WeakAttention, self).__init__()
+        self.to_bottleneck = torch.nn.Conv1d(num_features_in,
+                                             num_features_bottleneck,
+                                             kernel_size=1,
+                                             bias=False)
+        self.bottleneck_to_weight = torch.nn.Conv1d(num_features_bottleneck,
+                                                    num_features_out * 4,
+                                                    kernel_size=1)
+        self.to_values = torch.nn.Conv1d(num_features_in,
+                                         num_features_out,
+                                         kernel_size=1,
+                                         bias=bias)
+        self.eps = eps
+
+    def forward(self, x):
+        """
+        (batch_size, num_features, T) -> batch_size, num_features, T)
+        """
+        bottleneck = self.to_bottleneck(x)
+        weights = self.bottleneck_to_weight(bottleneck).sigmoid()
+        values = self.to_values(x)
+        return _SpecialAverage.apply(values, weights, self.eps)
+
+
 
 class ConvModule(torch.nn.Module):
     """ this is resnet-like."""
     def __init__(self, idim, odim,
-                 hidden_dim, stride=1, dropout=0.0,
+                 hidden_dim, bottleneck_dim,
+                 groups=1,
+                 kernel_size=3, stride=1, dropout=0.0,
                  initial_batchnorm_scale=0.2):
         super(ConvModule, self).__init__()
 
@@ -753,7 +836,8 @@ class ConvModule(torch.nn.Module):
             [ torch.nn.Conv1d(idim, hidden_dim, stride=1, kernel_size=1, bias=False),
               LearnedNonlin(),
               torch.nn.Dropout(dropout),
-              Conv1dCompressed(hidden_dim),
+              Conv1dPlusWeakAttention(hidden_dim, hidden_dim, bottleneck_dim,
+                                      groups, kernel_size, bias=False),
               torch.nn.BatchNorm1d(num_features=hidden_dim, affine=True),
               LearnedNonlin(),
               torch.nn.Conv1d(hidden_dim, odim, stride=stride, kernel_size=1, bias=False) ])

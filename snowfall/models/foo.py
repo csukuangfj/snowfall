@@ -21,6 +21,9 @@ class Foo(AcousticModel):
                  num_features: int,
                  num_classes: int,
                  dim: int = 256,
+                 bottleneck_dim: int = 64,
+                 groups: int = 4,
+                 kernel_size: int = 3,
                  dropout: float = 0.1,
                  num_layers: Tuple[int] = (5, 12),
                  hidden_dim: int = 512,
@@ -49,14 +52,19 @@ class Foo(AcousticModel):
                       stride=2,
                       padding=1), nn.ReLU(inplace=True))
 
-        self.layers_before_subsample2 = nn.Sequential(* [ ConvModule(dim, dim, hidden_dim, dropout=dropout,
-                                                                     initial_batchnorm_scale=initial_batchnorm_scale) for
+        conv_module_args = { 'idim':dim, 'odim':dim,
+                             'hidden_dim':hidden_dim,
+                             'bottleneck_dim': bottleneck_dim,
+                             'groups': groups,
+                             'kernel_size': kernel_size,
+                             'dropout': dropout,
+                             'initial_batchnorm_scale': initial_batchnorm_scale }
+
+
+        self.layers_before_subsample2 = nn.Sequential(* [ ConvModule(**conv_module_args) for
                                                         _ in range(num_layers[0]) ])
-        self.subsample2 = ConvModule(dim, dim, hidden_dim, dropout=dropout,
-                                     initial_batchnorm_scale=initial_batchnorm_scale,
-                                     stride=2)
-        self.layers_after_subsample2 = nn.Sequential(* [ ConvModule(dim, dim, hidden_dim, dropout=dropout,
-                                                                    initial_batchnorm_scale=initial_batchnorm_scale) for
+        self.subsample2 = ConvModule(stride=2, **conv_module_args)
+        self.layers_after_subsample2 = nn.Sequential(* [ ConvModule(**conv_module_args) for
                                                         _ in range(num_layers[1]) ])
 
         self.final_conv1d = nn.Conv1d(dim, num_classes, stride=1, kernel_size=1, bias=True)
