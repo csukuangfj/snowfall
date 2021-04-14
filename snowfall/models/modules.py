@@ -156,6 +156,7 @@ class Conv1dPlusWeakAttention(torch.nn.Module):
         # a bias.
         self.conv = torch.nn.Conv1d(in_channels, out_channels,
                                     kernel_size=kernel_size,
+                                    padding=(kernel_size//2),
                                     groups=groups,
                                     bias=False)
         self.attn = WeakAttention(in_channels, out_channels,
