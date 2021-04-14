@@ -598,16 +598,16 @@ def SpecialAverage(values: torch.Tensor, weights: torch.Tensor,
 
     Args:
      values (corresponds to "v" == values in self-attention):  The values
-         to average.  Of shape (....,T) where T is the time dimension (other
+         to average.  Of shape (...,C,,T) where T is the time dimension (other
          dimensions are treated like batch or channel dimension, which is
          the same..)
 
-   weights:  a Tensor of shape (4,....,T) where the "...." must be identical to
+   weights:  a Tensor of shape (,...,4*C,T) where the "...." must be identical to
          the dimensions in `values`.  Its elements should be in the interval
          [0,1]; we suggest using something.sigmoid().
 
-
-         The interpretations of the 4 components of `weights` are:
+         The interpretations of the 4 ranges channels in  `weights`
+         (0..C-1, C...2*C-1 and so on) is:
              - forward contributed count, c_f
              - backward contributed count,  c_b
              - forward forgetting factor,  f_f
@@ -631,15 +631,16 @@ def SpecialAverage(values: torch.Tensor, weights: torch.Tensor,
 
      eps:  A small epsilon value intended to prevent division by zero
     """
-    assert weights.shape[0] == 4
-    assert weights.shape[1:] == values.shape
-    T = weights.shape[-1]
-    shape = values.shape[:-1]   # shape of quantities in the recursion
+    shape = list(values.shape)
+    C = shape[-2]  # num channels
+    shape[-2] *= 4
+    assert shape == list(weights.shape)
+    T = shape[-1]
 
-    c_f = weights[0]  # forward counts
-    c_b = weights[1]  # backward counts
-    f_f = weights[2]  # forward forgetting factor
-    f_b = weights[3]  # backward forgetting factor
+    c_f = torch.narrow(weights, -2, 0*C, C)  # forward counts
+    c_b = torch.narrow(weights, -2, 1*C, C)  # backward counts
+    f_f = torch.narrow(weights, -2, 2*C, C)  # forward forgetting factor
+    f_b = torch.narrow(weights, -2, 3*C, C)  # backward forgetting factor
 
     C_f = c_f.clone()
     X_f = c_f * values
@@ -700,13 +701,16 @@ class _SpecialAverage(torch.autograd.Function):
 
     @staticmethod
     def forward(ctx, values, weights, eps: float):
-        assert weights.shape[0] == 4
-        assert weights.shape[1:] == values.shape
+        shape = list(values.shape)
+        C = shape[-2]  # num channels
+        shape[-2] *= 4
+        assert shape == list(weights.shape)
+
         ctx.eps = eps
-        c_f = weights[0]  # forward counts
-        c_b = weights[1]  # backward counts
-        f_f = weights[2]  # forward forgetting factor
-        f_b = weights[3]  # backward forgetting factor
+        c_f = torch.narrow(weights, -2, 0*C, C)  # forward counts
+        c_b = torch.narrow(weights, -2, 1*C, C)  # backward counts
+        f_f = torch.narrow(weights, -2, 2*C, C)  # forward forgetting factor
+        f_b = torch.narrow(weights, -2, 3*C, C)  # backward forgetting factor
         CX_f = torch.stack((c_f, c_f * values))
         CX_b = torch.stack((c_b, c_b * values))
         f_f = f_f.unsqueeze(0)
@@ -731,11 +735,12 @@ class _SpecialAverage(torch.autograd.Function):
     def backward(ctx, y_grad: Tensor) -> (Tensor,Tensor,None):
 
         CX_fb,weights,values = ctx.saved_tensors
-        T = values.shape[-1]
-        c_f = weights[0]  # forward counts
-        c_b = weights[1]  # backward counts
-        f_f = weights[2]  # forward forgetting factor
-        f_b = weights[3]  # backward forgetting factor
+        T = values.shape[-1]  # sequence length
+        C = values.shape[-2]  # num channels
+        c_f = torch.narrow(weights, -2, 0*C, C)  # forward counts
+        c_b = torch.narrow(weights, -2, 1*C, C)  # backward counts
+        f_f = torch.narrow(weights, -2, 2*C, C)  # forward forgetting factor
+        f_b = torch.narrow(weights, -2, 3*C, C)  # backward forgetting factor
         C_f = CX_fb[0,0]
         X_f = CX_fb[0,1]
         C_b = CX_fb[1,0].flip(dims=(-1,))
@@ -778,7 +783,7 @@ class _SpecialAverage(torch.autograd.Function):
 
         f_f_grad = f_fb_grad[0][0]
         f_b_grad = f_fb_grad[1][0].flip(dims=(-1,))
-        weights_grad = torch.stack((c_f_grad, c_b_grad, f_f_grad, f_b_grad))
+        weights_grad = torch.cat((c_f_grad, c_b_grad, f_f_grad, f_b_grad), dim=-2)
         return (values_grad, weights_grad, None)
 
 
@@ -912,7 +917,7 @@ def test_special_average():
     a = torch.ones(3,3) * 0.333
     a = a.clone()
     a.requires_grad = True
-    weight = torch.ones(4,3,3) * 0.5
+    weight = torch.ones(3*4,3) * 0.5
     weight = weight.clone()
     weight.requires_grad = True
 
@@ -927,11 +932,12 @@ def test_special_average():
 def test_special_average_grad():
     torch.set_default_dtype(torch.float64)
 
+    b = 2
     m = 5
     n = 3
-    a = torch.randn(m,n).clone()
+    a = torch.randn(b,m,n).clone()
     a.requires_grad = True
-    weight = torch.randn(4,m,n).sigmoid().clone()
+    weight = torch.randn(b,4*m,n).sigmoid().clone()
     weight.requires_grad = True
 
     y1 = _SpecialAverage.apply(a, weight, 1.0e-08)
@@ -939,13 +945,13 @@ def test_special_average_grad():
     print(f"y1={y1},y1b={y1b}")
     assert torch.allclose(y1, y1b)
 
-    out_deriv = torch.randn(m,n)
+    out_deriv = torch.randn(b,m,n)
     objf1 = (y1*out_deriv).sum()
     objf1.backward()
 
     delta = 1.0e-5
-    a_delta = delta * torch.randn(m,n).clone()
-    weight_delta = delta * torch.randn(4,m,n).clone()
+    a_delta = delta * torch.randn(b,m,n).clone()
+    weight_delta = delta * torch.randn(b,4*m,n).clone()
 
     y2 = _SpecialAverage.apply(a+a_delta, weight+weight_delta, 1.0e-08)
     objf2 = (y2*out_deriv).sum()
