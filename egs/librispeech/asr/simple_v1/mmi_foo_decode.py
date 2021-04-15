@@ -199,6 +199,7 @@ def main():
     model = Foo(num_features=80,
                 num_classes=len(phone_ids) + 1,  # +1 for the blank symbol
                 dim=256,
+                bottleneck_dim=32,
                 num_layers=(5,20),
                 initial_batchnorm_scale=0.08,
                 hidden_dim=256)
