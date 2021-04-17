@@ -10,6 +10,7 @@ import torch
 from torch import Tensor
 import torch.nn.functional as F
 from typing import Tuple, Any
+from _k2 import discounted_cum_sum
 
 class _LearnedNonlin(torch.autograd.Function):
 
@@ -719,8 +720,16 @@ class _SpecialAverage(torch.autograd.Function):
         T = values.shape[-1]
         CX_fb = torch.stack((CX_f, torch.flip(CX_b, dims=(-1,))))
         f_fb = torch.stack((f_f, torch.flip(f_b, dims=(-1,))))
-        for t in range(1, T):
-            CX_fb[...,t] += CX_fb[...,t-1] * f_fb[...,t]
+
+        if True:
+            f_fb_dup = torch.stack((f_fb, f_fb), axis=1)
+            CX_fb_2axis = CX_fb.reshape(-1, T)
+            f_fb_2axis = f_fb_dup.reshape(-1, T)
+            discounted_cum_sum(CX_fb_2axis, f_fb_2axis, CX_fb_2axis)
+        else:
+            # slower, pure-PyTorch code
+            for t in range(1, T):
+                CX_fb[...,t] += CX_fb[...,t-1] * f_fb[...,t]
 
         C_f = CX_fb[0,0]
         X_f = CX_fb[0,1]
@@ -766,10 +775,25 @@ class _SpecialAverage(torch.autograd.Function):
                             torch.flip(f_b.unsqueeze(0), dims=(-1,))))
         f_fb_grad = torch.empty_like(f_fb)
 
-        for t in range(T-1,0,-1):
-            CX_fb_grad[...,t-1] += CX_fb_grad[...,t] * f_fb[...,t]
-            f_fb_grad[...,t] = (CX_fb_grad[...,t] * CX_fb[...,t-1]).sum(dim=1,keepdims=True)
+        if True:
+            CX_fb_grad_2axis = CX_fb_grad.reshape(-1, T)
+            # It would be nice if we could just do,
+            # f_fb_dup = torch.stack((f_fb, f_fb), axis=1)
+            # ... but there is a problem; for the backward pass
+            f_fb_dup = torch.empty_like(CX_fb_grad)
+            f_fb_dup[:,0:1,...,:-1] = f_fb[...,1:]
+            f_fb_dup[:,1:2,...,:-1] = f_fb[...,1:]
+            f_fb_dup[...,-1] = 0.   # seems to generate nan otherwise, even though it
+                                    # is mathematically a don't-care.
+            f_fb_2axis = f_fb_dup.reshape(-1, T)
+            discounted_cum_sum(CX_fb_grad_2axis, f_fb_2axis, CX_fb_grad_2axis,
+                               flip=True)
+        else:
+            for t in range(T-1,0,-1):
+                CX_fb_grad[...,t-1] += CX_fb_grad[...,t] * f_fb[...,t]
+
         f_fb_grad[...,0] = 0.
+        f_fb_grad[...,1:] = (CX_fb_grad[...,1:] * CX_fb[...,:-1]).sum(dim=1,keepdims=True)
 
         C_f_grad = CX_fb_grad[0,0]
         X_f_grad = CX_fb_grad[0,1]
