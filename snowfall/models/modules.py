@@ -182,7 +182,7 @@ class Conv1dPlusSpecialAvg(torch.nn.Module):
 
         Output: (N, C, L) = (batch,out_channels,length)
         """
-        weights = self.bottleneck_to_gating(bottleneck.sigmoid())
+        weights = self.bottleneck_to_gating(bottleneck).sigmoid()
 
         return self.conv(x) + _SpecialAverage.apply(x, weights, 1.0e-08) * self.avg_scales.unsqueeze(-1)
 
@@ -752,6 +752,9 @@ class _SpecialAverage(torch.autograd.Function):
         ctx.save_for_backward(CX_fb,weights,values)
 
         y = (X_f + X_b) / (C_f + C_b + eps)
+        y_sum = y.sum()
+        # check for NaN
+        assert y_sum - y_sum == 0.0
         return y
 
     @staticmethod
@@ -822,6 +825,17 @@ class _SpecialAverage(torch.autograd.Function):
         f_f_grad = f_fb_grad[0][0]
         f_b_grad = f_fb_grad[1][0].flip(dims=(-1,))
         weights_grad = torch.cat((c_f_grad, c_b_grad, f_f_grad, f_b_grad), dim=-2)
+
+        values_grad_sum = values_grad.sum()
+        weights_grad_sum = values_grad.sum()
+        # check for NaN
+        if (values_grad_sum - values_grad_sum != 0.0 or
+            weights_grad_sum - weights_grad_sum != 0.0):
+            torch.set_printoptions(edgeitems=1000)
+            print(f"values_grad={values_grad}, weights_grad={weights_grad}, "
+                  f"CX_fb_grad={CX_fb_grad}, CX_fb={CX_fb}, f_fb_grad={f_fb_grad}, f_fb={f_fb}, weights={weights},values={values}")
+            assert 0
+
         return (values_grad, weights_grad, None)
 
 
@@ -943,9 +957,9 @@ def test_special_average():
 def test_special_average_grad():
     torch.set_default_dtype(torch.float64)
 
-    b = 2
-    m = 5
-    n = 3
+    b = 200
+    m = 20
+    n = 1000
     a = torch.randn(b,m,n).clone()
     a.requires_grad = True
     weight = torch.randn(b,4*m,n).sigmoid().clone()
@@ -954,7 +968,10 @@ def test_special_average_grad():
     y1 = _SpecialAverage.apply(a, weight, 1.0e-08)
     y1b = SpecialAverage(a, weight, 1.0e-08)
     print(f"y1={y1},y1b={y1b}")
-    assert torch.allclose(y1, y1b)
+    diff = (y1-y1b).abs()
+    diff_max = diff.max()
+    assert diff_max < 1.0e-05
+    print("diff_max = ", diff_max)
 
     out_deriv = torch.randn(b,m,n)
     objf1 = (y1*out_deriv).sum()
@@ -971,7 +988,10 @@ def test_special_average_grad():
     diff_b = (a_delta * a.grad).sum() + (weight_delta * weight.grad).sum()
 
     print(f"diff_a={diff_a}, vs diff_b={diff_b}")
-    assert torch.allclose(diff_a, diff_b)
+    diff = (diff_a - diff_b).abs()
+    diff_max = diff.max()
+    assert diff_max < 1.0e-05
+    print("diff_max = ", diff_max)
     torch.set_default_dtype(torch.float32)
 
 

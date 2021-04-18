@@ -73,6 +73,18 @@ def load_checkpoint(filename: Pathlike, model: AcousticModel, optimizer: Optiona
             dst_state_dict[key] = src_state_dict.pop(src_key)
         assert len(src_state_dict) == 0
         model.load_state_dict(dst_state_dict)
+    elif list(model.state_dict().keys())[0].startswith('module.') \
+            and not list(checkpoint['state_dict'])[0].startswith('module.'):
+        # the checkpoint was saved not by DDP but we want to load for DDP
+        logging.info('load checkpoint from not-DDP to DDP')
+        dst_state_dict = model.state_dict()
+        src_state_dict = checkpoint['state_dict']
+        for key in dst_state_dict.keys():
+            src_key = key[7:] if key.startswith('module.') else key
+            dst_state_dict[key] = src_state_dict.pop(src_key)
+        assert len(src_state_dict) == 0
+        model.load_state_dict(dst_state_dict)
+
     else:
         model.load_state_dict(checkpoint['state_dict'])
 

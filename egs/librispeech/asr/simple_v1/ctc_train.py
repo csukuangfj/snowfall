@@ -223,7 +223,7 @@ def main():
     fix_random_seed(42)
 
     start_epoch = 0
-    num_epochs = 8
+    num_epochs = 2
 
     exp_dir = 'exp-lstm-adam-ctc-musan'
     setup_logger('{}/log/log-train'.format(exp_dir))
@@ -303,10 +303,10 @@ def main():
     device_id = 0
     device = torch.device('cuda', device_id)
     model = TdnnLstm1b(
-        num_features=40,
+        num_features=80,
         num_classes=len(phone_ids) + 1,  # +1 for the blank symbol
-        subsampling_factor=3)
-    
+        subsampling_factor=4)
+
     model.to(device)
     describe(model)
 

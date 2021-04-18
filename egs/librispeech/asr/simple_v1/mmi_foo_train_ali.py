@@ -37,6 +37,7 @@ from snowfall.dist import setup_dist
 from snowfall.models import AcousticModel
 from snowfall.models.foo import Foo
 from snowfall.models.transformer import Noam
+from snowfall.models.tdnn_lstm import TdnnLstm1b  # alignment model
 from snowfall.objectives import LFMMILoss, encode_supervisions
 from snowfall.training.diagnostics import measure_gradient_norms, optim_step_and_measure_param_change
 from snowfall.training.mmi_graph import MmiTrainingGraphCompiler
@@ -54,7 +55,8 @@ def get_objf(batch: Dict,
              den_scale: float = 1.0,
              tb_writer: Optional[SummaryWriter] = None,
              global_batch_idx_train: Optional[int] = None,
-             optimizer: Optional[torch.optim.Optimizer] = None):
+             optimizer: Optional[torch.optim.Optimizer] = None,
+             ali_model: Optional[AcousticModel] = None):
     feature = batch['inputs']
     # at entry, feature is [N, T, C]
     feature = feature.permute(0, 2, 1)  # now feature is [N, C, T]
@@ -74,6 +76,18 @@ def get_objf(batch: Dict,
 
     with grad_context():
         nnet_output = model(feature)
+
+        if (ali_model is not None and global_batch_idx_train is not None
+            and global_batch_idx_train < 1000):
+            with torch.no_grad():
+                ali_model_output = ali_model(feature)
+            # subsampling is done slightly differently, may be small length
+            # differences.
+            min_len = min(ali_model_output.shape[2], nnet_output.shape[2])
+            ali_model_scale = 0.25 # scale less than one so it will be encouraged
+                                  # to mimic ali_model's output
+            nnet_output = nnet_output.clone()  # or log-softmax backprop will fail.
+            nnet_output[...,:min_len] += ali_model_scale * ali_model_output[...,:min_len]
 
         # nnet_output is [N, C, T]
         nnet_output = nnet_output.permute(0, 2, 1)  # now nnet_output is [N, T, C]
@@ -147,7 +161,9 @@ def get_validation_objf(dataloader: torch.utils.data.DataLoader,
 
 def train_one_epoch(dataloader: torch.utils.data.DataLoader,
                     valid_dataloader: torch.utils.data.DataLoader,
-                    model: AcousticModel, P: k2.Fsa,
+                    model: AcousticModel,
+                    P: k2.Fsa,
+                    ali_model: AcousticModel,
                     device: torch.device,
                     graph_compiler: MmiTrainingGraphCompiler,
                     optimizer: torch.optim.Optimizer,
@@ -215,7 +231,8 @@ def train_one_epoch(dataloader: torch.utils.data.DataLoader,
             den_scale=den_scale,
             tb_writer=tb_writer,
             global_batch_idx_train=global_batch_idx_train,
-            optimizer=optimizer
+            optimizer=optimizer,
+            ali_model=ali_model
         )
 
         total_objf += curr_batch_objf
@@ -338,7 +355,7 @@ def run(rank, world_size, args):
     fix_random_seed(42)
     setup_dist(rank, world_size, args.master_port)
 
-    exp_dir = Path('exp-foo-noam-mmi-musan-sa2b-rev')
+    exp_dir = Path('exp-foo-noam-mmi-musan-sa2c-rev')
     setup_logger(f'{exp_dir}/log/log-train-{rank}')
     if args.tensorboard and rank == 0:
         tb_writer = SummaryWriter(log_dir=f'{exp_dir}/tensorboard')
@@ -379,13 +396,21 @@ def run(rank, world_size, args):
                 initial_batchnorm_scale=0.25,
                 scale=0.5,
                 hidden_dim=256)
+
     for name,module in model.named_modules():
         module.name = name
 
+    ali_model = TdnnLstm1b(
+        num_features=80,
+        num_classes=len(phone_ids) + 1,  # +1 for the blank symbol
+        subsampling_factor=4)
+    ali_model_fname = Path('exp-lstm-adam-ctc-musan/epoch-1.pt')
+    ali_model.load_state_dict(torch.load(ali_model_fname, map_location='cpu')['state_dict'])
 
     model.P_scores = nn.Parameter(P.scores.clone(), requires_grad=True)
 
     model.to(device)
+    ali_model.to(device)
     describe(model)
 
     model = DDP(model, device_ids=[rank])
@@ -438,6 +463,7 @@ def run(rank, world_size, args):
             valid_dataloader=valid_dl,
             model=model,
             P=P,
+            ali_model=ali_model,
             device=device,
             graph_compiler=graph_compiler,
             optimizer=optimizer,
