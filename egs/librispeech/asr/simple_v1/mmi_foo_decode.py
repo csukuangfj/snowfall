@@ -177,7 +177,7 @@ def main():
     epoch = args.epoch
     avg = args.avg
 
-    exp_dir = Path('exp-foo-noam-mmi-musan-sa-rev')
+    exp_dir = Path('exp-foo-noam-mmi-musan-sa2-rev')
     setup_logger('{}/log/log-decode'.format(exp_dir), log_level='debug')
 
     # load L, G, symbol_table
@@ -201,7 +201,8 @@ def main():
                 dim=256,
                 bottleneck_dim=32,
                 num_layers=(5,20),
-                initial_batchnorm_scale=0.08,
+                initial_batchnorm_scale=0.25,
+                scale=0.5,
                 hidden_dim=256)
 
     model.P_scores = torch.nn.Parameter(P.scores.clone(), requires_grad=False)

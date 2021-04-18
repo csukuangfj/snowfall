@@ -23,11 +23,12 @@ class Foo(AcousticModel):
                  dim: int = 256,
                  bottleneck_dim: int = 64,
                  groups: int = 4,
-                 kernel_size: int = 3,
+                 kernel_size: int = 5,
                  dropout: float = 0.1,
                  num_layers: Tuple[int] = (5, 12),
                  hidden_dim: int = 512,
-                 initial_batchnorm_scale=0.2) -> None:
+                 initial_batchnorm_scale=0.5,
+                 scale=0.5) -> None:
         super().__init__()
         self.num_features = num_features
         self.num_classes = num_classes
@@ -55,10 +56,10 @@ class Foo(AcousticModel):
         conv_module_args = { 'idim':dim, 'odim':dim,
                              'hidden_dim':hidden_dim,
                              'bottleneck_dim': bottleneck_dim,
-                             'groups': groups,
                              'kernel_size': kernel_size,
                              'dropout': dropout,
-                             'initial_batchnorm_scale': initial_batchnorm_scale }
+                             'initial_batchnorm_scale': initial_batchnorm_scale,
+                             'scale': scale}
 
 
         self.layers_before_subsample2 = nn.Sequential(* [ ConvModule(**conv_module_args) for

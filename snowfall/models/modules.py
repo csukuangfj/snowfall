@@ -136,42 +136,55 @@ class Conv1dCompressed(torch.nn.Module):
                         padding, self.dilation, self.groups)
 
 
-class Conv1dPlusWeakAttention(torch.nn.Module):
+class Conv1dPlusSpecialAvg(torch.nn.Module):
     """
     This is a Conv1d, added to WeakAttention (i.e. the outputs of the
-    Conv1d and WeakAttention are added together.
+    Conv1d and WeakAttention are added together.  Think of it as
+    a slightly more powerful replacement for Conv1d with groups=in_channels.
 
-    Note: it inherently has a bias, as the WeakAttention module
-    has one
+    It accepts the input to be averaged, and a bottleneck input that
+    acts as input for the gating/attention, as 2 separate inputs.
     """
     def __init__(self,
-                 in_channels: int,
-                 out_channels: int,
+                 channels: int,
                  bottleneck_channels: int,
-                 groups: int = 1,
                  kernel_size: int = 3,
                  bias: bool = True):
-        super(Conv1dPlusWeakAttention, self).__init__()
+        super(Conv1dPlusSpecialAvg, self).__init__()
 
-        # No need for bias here, as the WeakAttention module has
-        # a bias.
-        self.conv = torch.nn.Conv1d(in_channels, out_channels,
+        self.conv = torch.nn.Conv1d(channels, channels,
                                     kernel_size=kernel_size,
                                     padding=(kernel_size//2),
-                                    groups=groups,
-                                    bias=False)
-        self.attn = WeakAttention(in_channels, out_channels,
-                                  bottleneck_channels,
-                                  bias=bias)
+                                    groups=channels,
+                                    bias=bias)
 
+        self.bottleneck_to_gating = torch.nn.Conv1d(bottleneck_channels,
+                                                    channels*4,
+                                                    kernel_size=1,
+                                                    padding=0,
+                                                    bias=True)
 
+        self.avg_scales = torch.nn.Parameter(torch.empty(channels))
+        self.reset_parameters()
 
-    def forward(self, x):
+    def reset_parameters(self):
+        init = torch.nn.init
+        # can experiment with the following.  note: the non-randomness of the
+        # sign doesn't matter here, because the input has no preferred sign.
+        init.uniform_(self.avg_scales, 0.25, 0.5)
+
+    def forward(self, x, bottleneck):
         """
-        Input: (N, C, L) = (batch,channel,length)
-        Output: (N, C, L) = (batch,channel,length)
+        x:  (batch,in_channels,length)
+        bottleneck:  (batch,bottleneck_channels,length).
+                  (will probably be the output of a linear or conv1d
+                  component).
+
+        Output: (N, C, L) = (batch,out_channels,length)
         """
-        return self.conv(x) + self.attn(x)
+        weights = self.bottleneck_to_gating(bottleneck.sigmoid())
+
+        return self.conv(x) + _SpecialAverage.apply(x, weights, 1.0e-08) * self.avg_scales.unsqueeze(-1)
 
 
 
@@ -812,75 +825,41 @@ class _SpecialAverage(torch.autograd.Function):
         return (values_grad, weights_grad, None)
 
 
-class WeakAttention(torch.nn.Module):
-    """
-    Something much weaker than regular attention.. aiming for this to possibly  replace
-    attention.
-    """
-    def __init__(self, num_features_in: int, num_features_out: int,
-                 num_features_bottleneck: int,  dim: int = 1,
-                 bias: bool = True, eps: float = 1.0e-10):
-        """
-        Constructor.  Args:
-              num_features_in: number of features at the input
-              num_features_out: number of features at the output
-           num_features_bottleneck:  number of features at an internal
-                 bottleneck we use to limit the number of parameters
-                 devoted to the weights.
-        """
-        super(WeakAttention, self).__init__()
-        self.to_bottleneck = torch.nn.Conv1d(num_features_in,
-                                             num_features_bottleneck,
-                                             kernel_size=1,
-                                             bias=False)
-        self.bottleneck_to_weight = torch.nn.Conv1d(num_features_bottleneck,
-                                                    num_features_out * 4,
-                                                    kernel_size=1)
-        self.to_values = torch.nn.Conv1d(num_features_in,
-                                         num_features_out,
-                                         kernel_size=1,
-                                         bias=bias)
-        self.eps = eps
-
-    def forward(self, x):
-        """
-        (batch_size, num_features, T) -> batch_size, num_features, T)
-        """
-        bottleneck = self.to_bottleneck(x)
-        weights = self.bottleneck_to_weight(bottleneck).sigmoid()
-        values = self.to_values(x)
-        return _SpecialAverage.apply(values, weights, self.eps)
-
 
 
 class ConvModule(torch.nn.Module):
     """ this is resnet-like."""
     def __init__(self, idim, odim,
                  hidden_dim, bottleneck_dim,
-                 groups=1,
                  kernel_size=3, stride=1, dropout=0.0,
-                 initial_batchnorm_scale=0.2):
+                 initial_batchnorm_scale=0.25,
+                 scale=0.25):
         super(ConvModule, self).__init__()
 
-        self.layers = torch.nn.Sequential(*
+        self.to_inner = torch.nn.Sequential(*
             [ torch.nn.Conv1d(idim, hidden_dim, stride=1, kernel_size=1, bias=False),
               LearnedNonlin(),
-              torch.nn.Dropout(dropout),
-              Conv1dPlusWeakAttention(hidden_dim, hidden_dim, bottleneck_dim,
-                                      groups, kernel_size, bias=False),
-              torch.nn.BatchNorm1d(num_features=hidden_dim, affine=True),
-              LearnedNonlin(),
-              torch.nn.Conv1d(hidden_dim, odim, stride=stride, kernel_size=1, bias=False) ])
+              torch.nn.Dropout(dropout) ])
+        self.to_bottleneck = torch.nn.Conv1d(idim, bottleneck_dim, stride=1,
+                                             kernel_size=1, bias=False)
+        self.special_avg = Conv1dPlusSpecialAvg(hidden_dim, bottleneck_dim,
+                                                kernel_size, bias=False)
+
+        self.after_special_avg = torch.nn.Sequential(
+            * [ torch.nn.BatchNorm1d(num_features=hidden_dim, affine=True),
+                LearnedNonlin(),
+                torch.nn.Conv1d(hidden_dim, odim, stride=stride, kernel_size=1, bias=False) ])
 
         self.norm = torch.nn.BatchNorm1d(num_features=odim, affine=True)
         self.final_norm = torch.nn.BatchNorm1d(num_features=odim, affine=True)
 
         if stride != 1 or odim != idim:
-            self.bypass_conv = torch.nn.Conv1d(odim, idim, stride=stride,
+            self.bypass_conv = torch.nn.Conv1d(idim, odim, stride=stride,
                                                kernel_size=1, bias=False)
         else:
             self.register_parameter('bypass_conv', None)
         self.initial_batchnorm_scale = initial_batchnorm_scale
+        self.scale = scale
         self.reset_parameters()
 
     def reset_parameters(self):
@@ -896,22 +875,29 @@ class ConvModule(torch.nn.Module):
         Output: (N, C, L) = (batch,channel,length)
         """
         bypass = self.bypass_conv(x) if self.bypass_conv is not None else x
-        x = self.layers(x)
-        x = self.norm(x)
+
+        inner = self.to_inner(x)
+        bottleneck = self.to_bottleneck(x)
+        avg_output = self.special_avg(inner, bottleneck)
+        x = self.after_special_avg(avg_output)
+        x = self.norm(x) * self.scale
         return self.final_norm(x + bypass)
         return out
 
 
-def test_conv():
-    batch_size = 2
-    num_channels = 3
+def test_conv_module():
+    idim = 50
+    odim = 256
+    c = ConvModule(idim=idim, odim=odim, hidden_dim=128, bottleneck_dim=32,
+                   kernel_size=5, stride=2, dropout=0.1,
+                   initial_batchnorm_scale=0.5)
+
     T = 20
-    input = torch.ones(batch_size, num_channels, T)
-
-    layer = Conv1dCompressed(num_channels)
-
-    output = layer(input)
+    batch_size = 9
+    x = torch.ones(batch_size, idim, T)
+    output = c(x)
     print("output = ", output)
+    assert output.shape[1] == odim
 
 
 def test_slow_batchnorm_old():
@@ -992,9 +978,7 @@ def test_special_average_grad():
 def main():
     test_special_average()
     test_special_average_grad()
-    return
-
-    test_conv()
+    test_conv_module()
     test_normalize()
     test_slow_batchnorm_old()
     test_slow_batchnorm()

@@ -338,7 +338,7 @@ def run(rank, world_size, args):
     fix_random_seed(42)
     setup_dist(rank, world_size, args.master_port)
 
-    exp_dir = Path('exp-foo-noam-mmi-musan-sa-rev')
+    exp_dir = Path('exp-foo-noam-mmi-musan-sa2-rev')
     setup_logger(f'{exp_dir}/log/log-train-{rank}')
     if args.tensorboard and rank == 0:
         tb_writer = SummaryWriter(log_dir=f'{exp_dir}/tensorboard')
@@ -376,7 +376,8 @@ def run(rank, world_size, args):
                 dim=256,
                 bottleneck_dim=32,
                 num_layers=(5,20),
-                initial_batchnorm_scale=0.08,
+                initial_batchnorm_scale=0.25,
+                scale=0.5,
                 hidden_dim=256)
     for name,module in model.named_modules():
         module.name = name
