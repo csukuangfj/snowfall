@@ -749,6 +749,11 @@ class _SpecialAverage(torch.autograd.Function):
         C_b = CX_fb[1,0].flip(dims=(-1,))
         X_b = CX_fb[1,1].flip(dims=(-1,))
 
+        if C_f.min() < 0 or C_f.max() > (T+10) or C_b.min() < 0 or C_b.max() > (T+10):
+            logging.info(f"C_f min,max=f{C_f.min(),C_f.max()}, C_b min,max=f{C_b.min(),C_b.max()}")
+            logging.info(f"name=f{self.name}")
+            assert 0
+
         ctx.save_for_backward(CX_fb,weights,values)
 
         y = (X_f + X_b) / (C_f + C_b + eps)
@@ -831,7 +836,11 @@ class _SpecialAverage(torch.autograd.Function):
         # check for NaN
         if (values_grad_sum - values_grad_sum != 0.0 or
             weights_grad_sum - weights_grad_sum != 0.0):
-            torch.set_printoptions(edgeitems=1000)
+            torch.set_printoptions(edgeitems=5)
+            try:
+                print(f"self.name={self.name}")
+            except:
+                pass
             print(f"values_grad={values_grad}, weights_grad={weights_grad}, "
                   f"CX_fb_grad={CX_fb_grad}, CX_fb={CX_fb}, f_fb_grad={f_fb_grad}, f_fb={f_fb}, weights={weights},values={values}")
             assert 0
@@ -852,7 +861,7 @@ class ConvModule(torch.nn.Module):
 
         self.to_inner = torch.nn.Sequential(*
             [ torch.nn.Conv1d(idim, hidden_dim, stride=1, kernel_size=1, bias=False),
-              LearnedNonlin(),
+              #LearnedNonlin(),
               torch.nn.Dropout(dropout) ])
         self.to_bottleneck = torch.nn.Conv1d(idim, bottleneck_dim, stride=1,
                                              kernel_size=1, bias=False)
@@ -888,6 +897,7 @@ class ConvModule(torch.nn.Module):
         Input: (N, C, L) = (batch,channel,length)
         Output: (N, C, L) = (batch,channel,length)
         """
+
         bypass = self.bypass_conv(x) if self.bypass_conv is not None else x
 
         inner = self.to_inner(x)
@@ -938,65 +948,51 @@ def test_slow_batchnorm():
         print(f"x={x}, y={y}")
 
 
-def test_special_average():
-    a = torch.ones(3,3) * 0.333
-    a = a.clone()
-    a.requires_grad = True
-    weight = torch.ones(3*4,3) * 0.5
-    weight = weight.clone()
-    weight.requires_grad = True
-
-    y = _SpecialAverage.apply(a, weight, 1.0e-08)
-    y.sum().backward()
-    print(y.numel(), a.grad.sum())
-    assert torch.allclose(torch.Tensor([1.0*y.numel()]), a.grad.sum())
-
-    print(f"agrad = {a.grad}, weightgrad = {weight.grad}")
-
 
 def test_special_average_grad():
     torch.set_default_dtype(torch.float64)
+    for i in range(10):
+        device = torch.device('cuda:0') if i % 2 == 0 else torch.device('cpu')
+        b = 200
+        m = 20
+        n = 1000
+        a = torch.randn(b,m,n).clone().to(device)
+        a.requires_grad = True
+        weight = torch.randn(b,4*m,n).sigmoid().clone().to(device)
+        weight.requires_grad = True
 
-    b = 200
-    m = 20
-    n = 1000
-    a = torch.randn(b,m,n).clone()
-    a.requires_grad = True
-    weight = torch.randn(b,4*m,n).sigmoid().clone()
-    weight.requires_grad = True
+        y1 = _SpecialAverage.apply(a, weight, 1.0e-08)
+        y1b = SpecialAverage(a, weight, 1.0e-08)
+        print(f"y1={y1},y1b={y1b}")
+        diff = (y1-y1b).abs()
+        diff_max = diff.max()
+        assert diff_max < 1.0e-08
+        print("diff_max = ", diff_max)
 
-    y1 = _SpecialAverage.apply(a, weight, 1.0e-08)
-    y1b = SpecialAverage(a, weight, 1.0e-08)
-    print(f"y1={y1},y1b={y1b}")
-    diff = (y1-y1b).abs()
-    diff_max = diff.max()
-    assert diff_max < 1.0e-05
-    print("diff_max = ", diff_max)
+        out_deriv = torch.randn(b,m,n).to(device)
+        objf1 = (y1*out_deriv).sum()
+        objf1.backward()
 
-    out_deriv = torch.randn(b,m,n)
-    objf1 = (y1*out_deriv).sum()
-    objf1.backward()
+        delta = 1.0e-5
+        a_delta = delta * torch.randn(b,m,n).clone().to(device)
+        weight_delta = delta * torch.randn(b,4*m,n).clone().to(device)
 
-    delta = 1.0e-5
-    a_delta = delta * torch.randn(b,m,n).clone()
-    weight_delta = delta * torch.randn(b,4*m,n).clone()
+        y2 = _SpecialAverage.apply(a+a_delta, weight+weight_delta, 1.0e-08)
+        objf2 = (y2*out_deriv).sum()
 
-    y2 = _SpecialAverage.apply(a+a_delta, weight+weight_delta, 1.0e-08)
-    objf2 = (y2*out_deriv).sum()
+        diff_a = (objf2 - objf1)
+        diff_b = (a_delta * a.grad).sum() + (weight_delta * weight.grad).sum()
 
-    diff_a = (objf2 - objf1)
-    diff_b = (a_delta * a.grad).sum() + (weight_delta * weight.grad).sum()
-
-    print(f"diff_a={diff_a}, vs diff_b={diff_b}")
-    diff = (diff_a - diff_b).abs()
-    diff_max = diff.max()
-    assert diff_max < 1.0e-05
-    print("diff_max = ", diff_max)
+        print(f"device={device}")
+        print(f"diff_a={diff_a}, vs diff_b={diff_b}")
+        diff = (diff_a - diff_b).abs()
+        diff_max = diff.max()
+        assert diff_max < 1.0e-05
+        print("diff_max = ", diff_max)
     torch.set_default_dtype(torch.float32)
 
 
 def main():
-    test_special_average()
     test_special_average_grad()
     test_conv_module()
     test_normalize()
